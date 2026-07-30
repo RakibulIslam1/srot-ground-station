@@ -57,6 +57,33 @@ while True:
 ```
 Bondor's Fly view should show Link OK, the attitude indicator moving, and mode = Auto.
 
+## Backing up parameters (do this before every reflash)
+
+A firmware upload preserves the ESP32's NVS, so tuning normally survives. Two things destroy
+it: a build that **bumps `PARAM_DEFAULTS_VER`** (which rewrites every parameter from its
+compiled default and reports `Params reset to build defaults`), and a full-chip erase.
+
+**Parameters → Export** writes a QGC-compatible `.params` file containing every value,
+including the **`CAL_*`** rows that mirror the sensor calibration — accel/mag/level trim and
+the eight MOTOR_DETECT directions. That calibration lives in a separate NVS namespace and is
+not otherwise recoverable; redoing the mag cal means physically spinning the vehicle.
+
+Export is disabled until the whole parameter list has downloaded — a partial file would look
+complete and silently restore defaults for everything missing.
+
+**Parameters → Import** parses the file and shows a **diff first**: what changes, what already
+matches, what the file has that this vehicle doesn't (skipped), and what the vehicle has that
+the file doesn't (left untouched, never reset). It flags changes that need a reboot
+(`PIN_*`, `ESPNOW_EN`). Nothing is written until you confirm.
+
+The write is throttled and **acknowledged**: `PARAM_SET` has no ACK of its own, so each write
+is confirmed against the vehicle's `PARAM_VALUE` echo and anything unconfirmed is retried.
+Parameters that never confirm are named in the result — a half-applied restore reporting
+success would be the worst outcome here. `SYS_PARAM_VER` and the momentary `ATUNE` / `MAG_ALIGN`
+triggers are skipped on import (restoring them is meaningless, or would start an autotune).
+
+Recommended reflash routine: **Export → flash → Import → power-cycle → spot-check the tune.**
+
 ## Roadmap (phases)
 1. ✅ Connection + Fly HUD + arm/mode + joystick teleop + SROT Move console.
 2. ✅ Parameters editor (SROT metadata) + MAVLink inspector.

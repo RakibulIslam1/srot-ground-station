@@ -32,11 +32,15 @@ export const GROUP_ORDER = [
   'Failsafe',
   'Pilot / Input',
   'Motors & Frame',
+  'Heading reference',
   'Joystick buttons',
   'Servos & Payload',
   'Lights & Buzzer',
   'Power',
   'GPIO pins',
+  // Calibration is deliberately LAST: these are a read/write view onto the sensor
+  // calibration so it can be backed up and restored, not knobs to turn by hand.
+  'Calibration (backup)',
   'Other'
 ]
 
@@ -178,6 +182,34 @@ const META: Record<string, ParamMeta> = {
   LEAK_EN: { label: 'Leak failsafe', group: 'Failsafe', options: BOOL },
   ARMING_CHECK: { label: 'Pre-arm checks', group: 'Failsafe', options: BOOL },
 
+  // Heading reference — one-shot magnetic alignment (control/yaw_ref)
+  MAG_YAW_REF: {
+    label: 'Magnetic yaw reference',
+    group: 'Heading reference',
+    options: BOOL,
+    help:
+      'Off = yaw is relative (drifts, no north). On = read the magnetometer ONCE at boot ' +
+      '(disarmed and still) to make heading absolute, then never again — so thruster ' +
+      'currents can never move the attitude solution. Fixes the reference, not the drift. ' +
+      'Needs a mag calibration done in the hull with electronics powered.'
+  },
+  MAG_DECL: {
+    label: 'Magnetic declination',
+    group: 'Heading reference',
+    unit: '°',
+    min: -30,
+    max: 30,
+    step: 0.1,
+    decimals: 1,
+    help: 'Local magnetic-to-true north offset, east positive. ~0.4° for Bangladesh.'
+  },
+  MAG_ALIGN: {
+    label: 'Re-align now',
+    group: 'Heading reference',
+    options: BOOL,
+    help: 'Momentary: set 1 to redo the alignment. Refused while armed. Auto-clears.'
+  },
+
   // Pilot / input
   PILOT_SPEED: { label: 'Pilot speed', group: 'Pilot / Input', decimals: 2 },
   PILOT_YAW_RATE: { label: 'Pilot yaw rate', group: 'Pilot / Input', unit: '°/s', decimals: 0 },
@@ -232,5 +264,24 @@ export function getParamMeta(name: string): ParamMeta {
   if (META[name]) return META[name]
   if (/^PIN_/.test(name)) return { label: name, group: 'GPIO pins', decimals: 0, help: 'Reboot to apply.' }
   if (/^SERVO\d+_/.test(name)) return { label: name, group: 'Servos & Payload', decimals: 0 }
+  // CAL_* are a view onto the vehicle's sensor calibration (a separate NVS namespace),
+  // exposed so Export/Import can back it up. Editing them by hand breaks the attitude
+  // solution — re-run the calibration routine instead.
+  if (/^CAL_MDIR\d$/.test(name)) {
+    return {
+      label: name.replace('CAL_MDIR', 'Detected dir — thruster '),
+      group: 'Calibration (backup)',
+      options: DIRECTION,
+      help: 'Set by Motor Detect. Multiplies with MOT_n_DIRECTION.'
+    }
+  }
+  if (/^CAL_/.test(name)) {
+    return {
+      label: name,
+      group: 'Calibration (backup)',
+      decimals: 4,
+      help: 'Calibration result — back up with Export, do not hand-edit.'
+    }
+  }
   return { label: name, group: 'Other', decimals: 3 }
 }

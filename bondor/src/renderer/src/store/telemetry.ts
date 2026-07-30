@@ -27,6 +27,12 @@ export interface StatusLine {
   text: string
 }
 
+export interface ParamWriteResult {
+  written: string[]
+  /** Never acknowledged after every retry — the caller MUST surface these. */
+  failed: string[]
+}
+
 export interface AckLine {
   ts: number
   command: number
@@ -74,6 +80,10 @@ interface TelemetryState {
   requestParams: () => void
   setParam: (id: string, value: number) => void
   saveParams: () => void
+  writeParams: (
+    entries: Array<{ name: string; value: number }>,
+    onProgress?: (done: number, total: number) => void
+  ) => Promise<ParamWriteResult>
   sendCommand: (command: number, params?: number[]) => void
   sendServo: (channel1Based: number, us: number) => void
 }
@@ -87,6 +97,18 @@ let autoParamsRequested = false
 // we can re-request the missing ones when the stream stalls.
 const seenParamIdx = new Set<number>()
 let lastParamTs = 0
+// Latest PARAM_VALUE echo per name — the acknowledgement channel for writeParams().
+const paramAckLatest: Record<string, number> = {}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+// The value makes a round trip through a float32, so an exact compare would reject
+// echoes that are in fact correct and retry forever.
+function nearlyEqualNum(a: number, b: number): boolean {
+  if (a === b) return true
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false
+  return Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a), Math.abs(b))
+}
 
 export const useTelemetry = create<TelemetryState>((set, get) => ({
   status: { connected: false },
@@ -185,6 +207,10 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
         lastParamTs = m.ts
         if (id) {
           pendingParams[id] = Number(f.paramValue)
+          // The vehicle echoes PARAM_VALUE after every accepted PARAM_SET, which is the
+          // only per-parameter acknowledgement the protocol gives us. An in-flight bulk
+          // write watches this to know what landed and what needs resending.
+          paramAckLatest[id] = Number(f.paramValue)
           pendingParamCount = Number(f.paramCount) || pendingParamCount
           if (!paramFlushTimer) {
             paramFlushTimer = setTimeout(() => {
@@ -243,6 +269,64 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
 
   saveParams: () =>
     void window.bondor.sendCommandLong({ command: MAV_CMD.PREFLIGHT_STORAGE, params: [1] }),
+
+  // Bulk parameter write with per-parameter acknowledgement and retry — the restore
+  // half of Export/Import.
+  //
+  // Not a plain `entries.forEach(setParam)`: 200+ PARAM_SETs sent back-to-back overrun
+  // the link (badly over LoRa), and PARAM_SET has no ACK of its own, so a dropped one
+  // is invisible. A half-applied restore that reports success is the worst possible
+  // outcome here, so every write is confirmed against the vehicle's PARAM_VALUE echo
+  // and anything unconfirmed is resent.
+  writeParams: async (entries, onProgress) => {
+    const kind = get().status.kind
+    // LoRa comes through as a serial link to the bridge, but the air link underneath is
+    // slow and half-duplex. Serial-to-board tolerates ~20/s; be conservative otherwise.
+    const perBatch = 8
+    const batchGapMs = kind === 'serial' ? 400 : 700
+    const settleMs = kind === 'serial' ? 900 : 1800
+    const MAX_PASSES = 4
+
+    const target = new Map(entries.map((e) => [e.name, e.value]))
+    const written = new Set<string>()
+
+    for (let pass = 0; pass < MAX_PASSES && written.size < target.size; pass++) {
+      const todo = [...target.entries()].filter(([n]) => !written.has(n))
+
+      for (let i = 0; i < todo.length; i += perBatch) {
+        for (const [name, value] of todo.slice(i, i + perBatch)) {
+          delete paramAckLatest[name] // only accept an echo that arrives AFTER this send
+          void window.bondor.sendParamSet({ id: name, value })
+        }
+        await sleep(batchGapMs)
+        // Harvest echoes that have already come back so progress tracks reality.
+        for (const [name, value] of todo) {
+          const ack = paramAckLatest[name]
+          if (ack !== undefined && nearlyEqualNum(ack, value)) written.add(name)
+        }
+        onProgress?.(written.size, target.size)
+      }
+
+      // Let the last batch's echoes land before deciding what to retry.
+      await sleep(settleMs)
+      for (const [name, value] of todo) {
+        const ack = paramAckLatest[name]
+        if (ack !== undefined && nearlyEqualNum(ack, value)) written.add(name)
+      }
+      onProgress?.(written.size, target.size)
+    }
+
+    // Fold everything confirmed into the store so the UI reflects the vehicle without
+    // waiting for a full re-download.
+    const confirmed: Record<string, number> = {}
+    for (const n of written) confirmed[n] = target.get(n) as number
+    set({ paramValues: { ...get().paramValues, ...confirmed } })
+
+    return {
+      written: [...written],
+      failed: [...target.keys()].filter((n) => !written.has(n))
+    }
+  },
 
   sendCommand: (command, params) => void window.bondor.sendCommandLong({ command, params }),
 
