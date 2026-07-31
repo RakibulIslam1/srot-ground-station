@@ -24,7 +24,18 @@ export function ParamRow({ name }: { name: string }): JSX.Element {
   const [editing, setEditing] = useState(false)
 
   const shown = editing ? draft : value?.toFixed?.(meta.decimals ?? 3) ?? String(value ?? '')
-  const commit = (v: number): void => {
+  // Arrow-key / spinner increment. meta.step was declared for a dozen parameters but nothing
+  // read it, so every field stepped by the browser default of 1 — useless on a calibration
+  // trim that needs hundredths. Fall back to one unit in the last displayed decimal, which is
+  // the finest change the field can actually show.
+  const step = meta.step ?? 10 ** -(meta.decimals ?? 3)
+  const commit = (v: number, raw?: string): void => {
+    // Number('') is 0, not NaN, so a blanked field would silently write 0 — on a divider
+    // ratio or a failsafe threshold that is not a harmless default.
+    if (raw !== undefined && raw.trim() === '') {
+      setEditing(false)
+      return
+    }
     if (Number.isFinite(v)) setParam(name, v)
     setEditing(false)
   }
@@ -51,16 +62,18 @@ export function ParamRow({ name }: { name: string }): JSX.Element {
       ) : (
         <TextField
           size="small"
+          type="number"
           value={shown}
           onFocus={() => {
             setEditing(true)
             setDraft(String(value ?? ''))
           }}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => commit(Number(draft))}
+          onBlur={() => commit(Number(draft), draft)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') commit(Number(draft))
+            if (e.key === 'Enter') commit(Number(draft), draft)
           }}
+          inputProps={{ step, min: meta.min, max: meta.max }}
           InputProps={{
             endAdornment: meta.unit ? (
               <Typography variant="caption" color="text.secondary">

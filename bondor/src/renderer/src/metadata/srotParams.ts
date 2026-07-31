@@ -235,8 +235,12 @@ const META: Record<string, ParamMeta> = {
   // Power
   PM1_SRC: { label: 'PM1 source', group: 'Power', decimals: 0 },
   PM2_SRC: { label: 'PM2 source', group: 'Power', decimals: 0 },
-  PM1_VMULT: { label: 'PM1 volt multiplier', group: 'Power', decimals: 4 },
-  PM2_VMULT: { label: 'PM2 volt multiplier', group: 'Power', decimals: 4 },
+  // Both are calibration trims: type the value, watch the reading move, iterate.
+  //   new = now x (multimeter / reported)
+  // PM1 is the electronics-pack divider RATIO (~11); PM2 scales the thruster-pack voltage
+  // the 2nd board reports over ESP-NOW (1.0 = take it as sent).
+  PM1_VMULT: { label: 'PM1 divider ratio', group: 'Power', decimals: 4, step: 0.05 },
+  PM2_VMULT: { label: 'PM2 voltage trim', group: 'Power', decimals: 4, step: 0.01 },
 
   // Misc
   ESPNOW_EN: { label: 'ESP-NOW link', group: 'Other', options: BOOL },

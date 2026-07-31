@@ -280,25 +280,53 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
   // and anything unconfirmed is resent.
   writeParams: async (entries, onProgress) => {
     const kind = get().status.kind
-    // LoRa comes through as a serial link to the bridge, but the air link underneath is
-    // slow and half-duplex. Serial-to-board tolerates ~20/s; be conservative otherwise.
-    const perBatch = 8
-    const batchGapMs = kind === 'serial' ? 400 : 700
-    const settleMs = kind === 'serial' ? 900 : 1800
+    // The LoRa bridge appears as `kind === 'serial'` — it IS a USB serial port — so link
+    // kind alone cannot tell a direct board from a radio hop, and the old code paced the
+    // radio as if it were USB. The air link carries ONE uplink packet per received downlink
+    // slot (~8/s), so ~20 writes/s overran the bridge's queue and writes were silently
+    // dropped. That is what "sometimes it saves and sometimes it doesn't" was.
+    //
+    // Detect the bridge by the named values only it emits (the ground station streams
+    // LORA_RSSI/LORA_RX; a directly-connected board never sends either), so this needs no
+    // protocol change. Then pace under the 8/s ceiling and let the existing PARAM_VALUE
+    // confirm-and-retry do its job instead of being swamped.
+    //
+    // Three things matter about HOW this is evaluated, and all three were got wrong first
+    // time round:
+    //  1. It is re-read before every batch, not sampled once. The bridge's named values only
+    //     start flowing after it decodes its first downlink frame, so importing before the
+    //     vehicle is up — the ordinary pre-dive workflow — sampled an empty `named` and chose
+    //     the fast profile for the whole import. That is precisely the overrun being fixed.
+    //  2. "No telemetry at all yet" is treated as LoRa, not as USB. A direct board streams its
+    //     own named values within ~500 ms of connecting, so an empty `named` means we have not
+    //     heard from anything and must not assume the fast link. Guessing wrong toward slow
+    //     costs a minute on an import that works; guessing wrong toward fast loses parameters.
+    //  3. A stale LORA_* from an earlier session in the same app run only ever over-paces a
+    //     direct link, which is safe.
+    const linkProfile = (): { perBatch: number; gap: number; settle: number } => {
+      const n = get().named
+      const lora = n.LORA_RSSI !== undefined || n.LORA_RX !== undefined || Object.keys(n).length === 0
+      if (lora) return { perBatch: 4, gap: 1200, settle: 2500 }
+      return { perBatch: 8, gap: kind === 'serial' ? 400 : 700, settle: kind === 'serial' ? 900 : 1800 }
+    }
     const MAX_PASSES = 4
 
     const target = new Map(entries.map((e) => [e.name, e.value]))
     const written = new Set<string>()
+    let settleMs = linkProfile().settle
 
     for (let pass = 0; pass < MAX_PASSES && written.size < target.size; pass++) {
       const todo = [...target.entries()].filter(([n]) => !written.has(n))
 
-      for (let i = 0; i < todo.length; i += perBatch) {
-        for (const [name, value] of todo.slice(i, i + perBatch)) {
+      for (let i = 0; i < todo.length; ) {
+        const p = linkProfile()
+        settleMs = p.settle
+        for (const [name, value] of todo.slice(i, i + p.perBatch)) {
           delete paramAckLatest[name] // only accept an echo that arrives AFTER this send
           void window.bondor.sendParamSet({ id: name, value })
         }
-        await sleep(batchGapMs)
+        i += p.perBatch
+        await sleep(p.gap)
         // Harvest echoes that have already come back so progress tracks reality.
         for (const [name, value] of todo) {
           const ack = paramAckLatest[name]

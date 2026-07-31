@@ -2,20 +2,11 @@
 // =============================================================================
 //  SROT LoRa telemetry frame — shared by the control board (TX) and the ground
 //  station ESP32 (RX → MAVLink bridge). Compact fixed-size black-box downlink.
-//  39 bytes; CRC16-CCITT over everything before `crc`.
+//  41 bytes; CRC16-CCITT over everything before `crc`.
 //
-//  ---------------------------------------------------------------------------
-//  DUPLICATED FILE — keep in sync by hand.
-//  The other copy lives in the flight-firmware repo:
-//      RakibulIslam1/srot-control-board : shared/lora_telem_proto.h
-//  That repo is the SOURCE OF TRUTH — the control board is the transmitter.
-//  The two boards only talk if the struct layout AND the radio config below are
-//  byte-for-byte identical. If you change ANYTHING in this file:
-//    1. copy it verbatim to/from the other repo, and
-//    2. REFLASH BOTH the control board and the ground-station ESP32-C3.
-//  A one-sided change does not error — it silently fails CRC and the link goes
-//  quiet, which looks exactly like being out of radio range.
-//  ---------------------------------------------------------------------------
+//  FRAME SIZE CHANGED (39 → 41) when `aux_mv` was added. The receiver requires an exact
+//  size match, so a mismatched pair does not corrupt — the link simply goes SILENT, which
+//  looks identical to being out of range. Reflash BOTH boards together.
 // =============================================================================
 
 #include <stdint.h>
@@ -49,11 +40,17 @@ typedef struct {
     int16_t  pitch_cd;
     int16_t  yaw_cd;
     int16_t  depth_cm;    // cm (signed; + = deeper)
-    uint16_t batt_mv;     // mV
+    uint16_t batt_mv;     // mV — PM1, the ELECTRONICS/SBC pack (the board's own ADC)
     int16_t  curr_ca;     // cA (0.01 A)
     int16_t  rpm[8];      // per-thruster rpm
     int8_t   wtemp_c;     // water temp °C
     uint16_t ul_rx;       // diag: uplink MAVLink msgs the control board has handled over LoRa
+    // mV — PM2, the THRUSTER pack, relayed from the 2nd board over ESP-NOW. 0 = no fresh
+    // source. Added because the frame previously carried only PM1, so over LoRa the thruster
+    // voltage was structurally unreachable: the ground station emits SYS_STATUS (which a GCS
+    // maps to Battery 1) and never BATTERY_STATUS, so Battery 2 could never populate no
+    // matter how healthy the ESP-NOW link was.
+    uint16_t aux_mv;
     uint16_t crc;         // CRC16-CCITT over [0 .. offsetof(crc))
 } LoraTelem;
 #pragma pack(pop)
