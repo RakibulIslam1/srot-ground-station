@@ -64,6 +64,15 @@ interface TelemetryState {
   battCurr: number
   rpm: number[]
   named: Record<string, number>
+  // SROT_FW_BEHAVIOUR_REV, from AUTOPILOT_VERSION.middlewareSwVersion. -1 = not read yet.
+  //
+  // This is the number that decides whether the vehicle brakes. duburi_ws removed its
+  // host-side MOVE_STOP brake because rev 2 brakes on-board, and it refuses to arm below
+  // rev 2 -- so a hull flashed with older firmware coasts on every stop and abort, with
+  // nothing in any log to say why. The operator needs to see it BEFORE the vehicle goes
+  // in the water, and Bondor is where they look. 0 means firmware older than 2026-08-01
+  // (that build never populated the field), NOT "unknown" -- treat it as rev 1.
+  fwBehaviourRev: number
   statusText: StatusLine[]
   acks: AckLine[]
   paramValues: Record<string, number>
@@ -88,11 +97,17 @@ interface TelemetryState {
   sendServo: (channel1Based: number, us: number) => void
 }
 
+// AUTOPILOT_VERSION msgid, the payload of our MAV_CMD.REQUEST_MESSAGE probe.
+const MSG_ID_AUTOPILOT_VERSION = 148
+
 // --- module-level coalescing / guards (not reactive) ------------------------
 let pendingParams: Record<string, number> = {}
 let pendingParamCount = 0
 let paramFlushTimer: ReturnType<typeof setTimeout> | null = null
 let autoParamsRequested = false
+// Same one-shot-per-connection pattern as autoParamsRequested: the board only sends
+// AUTOPILOT_VERSION when asked, so ask once and re-arm on disconnect.
+let autoVersionRequested = false
 // Param download gap-fill (for lossy links like LoRa): track which indices arrived so
 // we can re-request the missing ones when the stream stalls.
 const seenParamIdx = new Set<number>()
@@ -127,6 +142,7 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
   battCurr: 0,
   rpm: new Array(8).fill(0),
   named: {},
+  fwBehaviourRev: -1,
   statusText: [],
   acks: [],
   paramValues: {},
@@ -146,6 +162,19 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
           autoParamsRequested = true
           get().requestParams()
         }
+        // Ask once per connection which firmware behaviour this hull is running. The
+        // board only sends AUTOPILOT_VERSION on request, and a rev the operator never
+        // sees is a rev they cannot act on.
+        if (!autoVersionRequested) {
+          autoVersionRequested = true
+          get().sendCommand(MAV_CMD.REQUEST_MESSAGE, [MSG_ID_AUTOPILOT_VERSION])
+        }
+        break
+      }
+      case 'AUTOPILOT_VERSION': {
+        // middlewareSwVersion carries SROT_FW_BEHAVIOUR_REV -- the board has no
+        // middleware, so the field was free. See the field comment on the store.
+        set({ fwBehaviourRev: Number(f.middlewareSwVersion) })
         break
       }
       case 'ATTITUDE': {
@@ -240,7 +269,14 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
   },
 
   setStatus: (s) => {
-    if (!s.connected) autoParamsRequested = false // re-arm auto-load for the next connect
+    if (!s.connected) {
+      autoParamsRequested = false // re-arm auto-load for the next connect
+      // Re-arm the version probe AND clear the cached rev. A stale "rev 2" carried
+      // across a reconnect would be a lie the moment a different board is plugged in,
+      // and this readout exists precisely to be trusted before a dive.
+      autoVersionRequested = false
+      set({ fwBehaviourRev: -1 })
+    }
     set({ status: s })
   },
   connect: (opts) => void window.bondor.connect(opts),

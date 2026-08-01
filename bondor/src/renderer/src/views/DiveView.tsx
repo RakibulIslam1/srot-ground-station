@@ -17,7 +17,7 @@ import { useGamepad } from '../joystick/useGamepad'
 import AttitudeIndicator from '../components/AttitudeIndicator'
 import HeadingIndicator from '../components/HeadingIndicator'
 import StatusConsole from '../components/StatusConsole'
-import { FLIGHT_MODE_LABELS, FlightMode } from '../../../shared/protocol'
+import { FLIGHT_MODE_LABELS, FlightMode, FW_BEHAVIOUR_REV_REQUIRED } from '../../../shared/protocol'
 
 const DEG = 180 / Math.PI
 
@@ -111,6 +111,23 @@ export default function DiveView(): JSX.Element {
                 <Tile label="Battery 2" value={t.battVolt2 > 0 ? t.battVolt2.toFixed(1) : '—'} unit="V" />
                 <Tile label="Water" value={(t.named['WTEMP'] ?? 0).toFixed(1)} unit="°C" />
                 <Tile label="Leak" value={t.named['LEAK'] ? 'LEAK' : 'dry'} warn={!!t.named['LEAK']} />
+                {/* Firmware behaviour revision. Below FW_BEHAVIOUR_REV_REQUIRED, MOVE_STOP
+                    coasts -- stop and abort apply ZERO braking thrust -- and duburi_ws has
+                    removed the host-side brake that used to cover it. Warn on the tile so
+                    it is impossible to miss on the pre-dive screen. -1 = the board has not
+                    answered our AUTOPILOT_VERSION probe yet. */}
+                <Tile
+                  label="Firmware"
+                  value={t.fwBehaviourRev < 0 ? '—' : `rev ${t.fwBehaviourRev}`}
+                  sub={
+                    t.fwBehaviourRev < 0
+                      ? 'no reply'
+                      : t.fwBehaviourRev < FW_BEHAVIOUR_REV_REQUIRED
+                        ? 'STOP COASTS'
+                        : 'brakes on stop'
+                  }
+                  warn={t.fwBehaviourRev >= 0 && t.fwBehaviourRev < FW_BEHAVIOUR_REV_REQUIRED}
+                />
               </Stack>
             </Stack>
           </CardContent>

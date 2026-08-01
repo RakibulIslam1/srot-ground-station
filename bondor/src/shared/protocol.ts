@@ -51,6 +51,14 @@ export enum MoveType {
 }
 
 // MAVLink command ids Bondor sends.
+// SROT_FW_BEHAVIOUR_REV the rest of the stack assumes (firmware include/config.h,
+// mirrored in duburi_ws srot_protocol.FW_BEHAVIOUR_REV_REQUIRED). Below this, MOVE_STOP
+// COASTS: it applies zero braking thrust. duburi_ws deleted its host-side reverse-leg
+// brake once the board started braking on its own, and refuses to arm under this number.
+// Bondor cannot refuse anything -- it is the pilot's console, not an autonomy gate -- but
+// it MUST show the operator what is in the hull before the vehicle goes in the water.
+export const FW_BEHAVIOUR_REV_REQUIRED = 2
+
 export const MAV_CMD = {
   COMPONENT_ARM_DISARM: 400,
   DO_SET_MODE: 176,
@@ -61,6 +69,7 @@ export const MAV_CMD = {
   PREFLIGHT_STORAGE: 245,
   DO_SET_SERVO: 183,
   PREFLIGHT_REBOOT_SHUTDOWN: 246,
+  REQUEST_MESSAGE: 512,
   USER_1: 31010,
   USER_2: 31011,
   USER_3: 31012,
