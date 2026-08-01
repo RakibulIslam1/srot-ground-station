@@ -42,6 +42,7 @@ static uint32_t s_ul_tx = 0;        // diag: uplink packets transmitted over LoR
 static uint32_t s_last_frame_ms = 0; // last telem frame bridged to Bondor
 static uint32_t s_dl_hb_last = 0;    // cached-value heartbeat keep-alive pacing (to Bondor)
 static uint32_t s_bat2_ms = 0;       // BATTERY_STATUS id 1 (thruster pack) pacing
+static uint32_t s_diag_ms = 0;       // NAMED_VALUE_FLOAT diagnostics pacing (2 Hz)
 // Cached last real vehicle state (never send fabricated 0/false to Bondor).
 // s_have_state gates that promise. Without it, s_last_mode = 0 IS a fabricated state —
 // 0 is STABILIZE — and the keep-alive below fires as soon as `now - s_last_frame_ms > 1000`,
@@ -51,6 +52,23 @@ static uint32_t s_bat2_ms = 0;       // BATTERY_STATUS id 1 (thruster pack) paci
 static uint8_t s_last_mode = 0;
 static bool    s_last_armed = false;
 static bool    s_have_state = false;
+static bool    s_link_dead = false;   // announced once per loss, cleared on recovery
+
+// How long the cached state may keep standing in for the real thing.
+//
+// The keep-alive exists so a brief telemetry gap does not make Bondor's link indicator
+// blink. It is NOT a licence to assert the vehicle's state indefinitely. s_have_state was
+// write-once: after the first frame the bridge emitted "mode X, ARMED" at 2 Hz for ever,
+// so a vehicle that went out of range — or lost power — while armed in AUTO left Bondor
+// showing connected/ARMED/AUTO with total confidence, permanently. Bondor's only liveness
+// test is heartbeat age (< 3 s), so nothing downstream could catch it either.
+//
+// Past this cutoff we go SILENT rather than send a state we no longer know. Silence is the
+// honest signal: Bondor's heartbeat test then fails and the link reads as down. Repeating
+// a stale arm state is worse than saying nothing, because "ARMED" is the one claim an
+// operator acts on.
+static const uint32_t LINK_STALE_MS = 1000;    // start bridging the gap with cached state
+static const uint32_t LINK_DEAD_MS  = 5000;    // past here we do not know, so we do not say
 
 // Accept only mode values this firmware actually defines. A frame that slips the CRC16 (or,
 // before the radio CRC was enabled, any corrupted frame at all) could otherwise paint an
@@ -99,14 +117,19 @@ static void ulqPush(const mavlink_message_t& m) {
 
 // Is this a STATE command — one where only the newest value matters (mode, arm)?
 // Distinct from an EVENT like SROT_MOVE, where every instance is meaningful.
-static bool isStateCmd(const mavlink_message_t& m, uint16_t* cmd_out) {
-  if (m.msgid == MAVLINK_MSG_ID_SET_MODE) { if (cmd_out) *cmd_out = 0xFFFF; return true; }
+//
+// `cmd_out` is a SUPERSEDE CLASS, not the raw command id: two messages supersede each other
+// only when they set the same piece of state. Legacy SET_MODE and COMMAND_LONG/DO_SET_MODE
+// are different encodings of one thing, so they share a class — tagging them separately (as
+// this did) meant a mode change sent one way would not displace a queued one sent the other.
+// Arm/disarm is its own class and must NOT be superseded by a mode change.
+static const uint16_t SC_MODE = 1, SC_ARM = 2;
+static bool isStateCmd(const mavlink_message_t& m, uint16_t* cls_out) {
+  if (m.msgid == MAVLINK_MSG_ID_SET_MODE) { if (cls_out) *cls_out = SC_MODE; return true; }
   if (m.msgid == MAVLINK_MSG_ID_COMMAND_LONG) {
     uint16_t c = mavlink_msg_command_long_get_command(&m);
-    if (c == MAV_CMD_COMPONENT_ARM_DISARM || c == MAV_CMD_DO_SET_MODE) {
-      if (cmd_out) *cmd_out = c;
-      return true;
-    }
+    if (c == MAV_CMD_DO_SET_MODE)          { if (cls_out) *cls_out = SC_MODE; return true; }
+    if (c == MAV_CMD_COMPONENT_ARM_DISARM) { if (cls_out) *cls_out = SC_ARM;  return true; }
   }
   return false;
 }
@@ -145,14 +168,15 @@ static void loraSend(const uint8_t* buf, uint16_t len) {
   LoRa.endPacket();      // blocks until TX done
   LoRa.receive();        // back to RX (the default state)
 }
-static void loraSendMsg(const mavlink_message_t& msg, int reps) {
+// One packet, one TDM slot. (This used to take a `reps` count and burst copies back-to-back
+// with a delay() between them, but every call site passed 1: loss tolerance is handled by
+// queueing three copies instead, which spreads them across three slots ~375 ms apart and is
+// strictly better against a burst fade. The parameter was dead weight.)
+static void loraSendMsg(const mavlink_message_t& msg) {
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-  for (int i = 0; i < reps; ++i) {
-    loraSend(buf, len);
-    s_ul_tx++;
-    if (i < reps - 1) delay(4);
-  }
+  loraSend(buf, len);
+  s_ul_tx++;
 }
 
 // ---- Uplink queueing: USB MAVLink → pending (sent later, one per TDM slot) ---
@@ -198,17 +222,17 @@ static void pollUsbUplink() {
 static void sendUplinkSlot() {
   mavlink_message_t q;
   if (ulqPop(q)) {
-    loraSendMsg(q, 1);
+    loraSendMsg(q);
     return;
   }
   if (s_mcValid && millis() - s_mcTs < 300) {
-    loraSendMsg(s_mc, 1);
+    loraSendMsg(s_mc);
     return;
   }
   mavlink_message_t m;
   mavlink_msg_heartbeat_pack(GCS_SYS_ID, GCS_COMP_ID, &m, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID,
                              0, 0, MAV_STATE_ACTIVE);
-  loraSendMsg(m, 1);
+  loraSendMsg(m);
 }
 
 // ---- Downlink: telemetry frame → MAVLink over USB (real values only) -------
@@ -235,6 +259,13 @@ static void bridgeFrame(const LoraTelem& t) {
   s_last_armed = (t.flags & LT_FLAG_ARMED) != 0;
   s_last_frame_ms = now;
   s_have_state = true;
+  if (s_link_dead) {   // recovered — say so, since the loss was announced
+    s_link_dead = false;
+    mavlink_message_t r;
+    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &r, MAV_SEVERITY_INFO,
+                                "LoRa telemetry recovered", 0, 0);
+    txMsg(r);
+  }
 
   // HEARTBEAT with the REAL mode/armed (4 Hz, from frames) — the only heartbeat we
   // send to Bondor, so mode/armed can't flicker.
@@ -246,7 +277,14 @@ static void bridgeFrame(const LoraTelem& t) {
   mavlink_msg_attitude_pack(SYS_ID, COMP_ID, &m, now,
                             t.roll_cd * CD2RAD, t.pitch_cd * CD2RAD, t.yaw_cd * CD2RAD, 0, 0, 0);
   txMsg(m);
-  mavlink_msg_vfr_hud_pack(SYS_ID, COMP_ID, &m, 0, 0, (int16_t)(t.yaw_cd / 100), 0, -(t.depth_cm / 100.0f), 0);
+  // VFR_HUD.heading is 0..360, but yaw_cd is signed (+/-18000 centi-degrees). Passing
+  // yaw_cd/100 straight through sent -90 into a uint16 field, which Bondor reads as 65446 —
+  // so every westerly heading was nonsense, but ONLY over LoRa. The control board
+  // normalises (mav_stream.cpp sendVfrHud), so the same vehicle disagreed with itself
+  // depending on which link you were watching.
+  int hdg = t.yaw_cd / 100;
+  hdg = ((hdg % 360) + 360) % 360;
+  mavlink_msg_vfr_hud_pack(SYS_ID, COMP_ID, &m, 0, 0, (int16_t)hdg, 0, -(t.depth_cm / 100.0f), 0);
   txMsg(m);
   mavlink_msg_sys_status_pack(SYS_ID, COMP_ID, &m, 0, 0, 0, 0, t.batt_mv, t.curr_ca, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
   txMsg(m);
@@ -272,23 +310,35 @@ static void bridgeFrame(const LoraTelem& t) {
     int32_t rpm[4];
     float volt[4] = {0}, curr[4] = {0};
     for (int i = 0; i < 4; ++i) rpm[i] = t.rpm[g * 4 + i];
-    mavlink_msg_esc_status_pack(SYS_ID, COMP_ID, &m, g * 4, now, rpm, volt, curr);
+    // time_usec, not milliseconds. This passed millis() raw, so the LoRa path reported
+    // timestamps 1000x smaller than the USB path did for the same vehicle.
+    mavlink_msg_esc_status_pack(SYS_ID, COMP_ID, &m, g * 4,
+                                (uint64_t)now * 1000ULL, rpm, volt, curr);
     txMsg(m);
   }
-  named("LEAK", (t.flags & LT_FLAG_LEAK) ? 1.0f : 0.0f, now);
-  named("KILL", (t.flags & LT_FLAG_KILL) ? 1.0f : 0.0f, now);
-  named("WTEMP", (float)t.wtemp_c, now);
-  named("LORA_RSSI", (float)LoRa.packetRssi(), now);
-  named("LORA_RX", (float)s_rx_count, now);
-  // Uplink diagnostics (localise where a command dies): USB_RX = cmds the C3 got from
-  // Bondor; UP_TX = uplink packets the C3 sent; UL_RX = uplink msgs the board handled.
-  named("USB_RX", (float)s_usb_msgs, now);
-  named("UP_TX", (float)s_ul_tx, now);
-  named("UL_RX", (float)t.ul_rx, now);
-  // UL_DROP = uplink msgs lost to a full queue. Non-zero means Bondor is writing faster
-  // than the ~8 uplink slots/s the TDM scheme allows — the cause of "sometimes the
-  // parameter saves, sometimes it doesn't". It must stay 0 during a parameter import.
-  named("UL_DROP", (float)s_ul_drop, now);
+
+  // Diagnostics at 2 Hz, matching the control board's own NAMED_VALUE_FLOAT cadence.
+  // These used to go out on EVERY frame (~8 Hz): nine values x ~28 B x 8/s is ~2 KB/s of a
+  // 115200 baud link (~11.5 KB/s) spent on diagnostics — competing directly with the
+  // relayed PARAM_VALUE traffic, which is the one thing the LoRa path is already short of.
+  // Nothing here changes fast enough to be worth that.
+  if (now - s_diag_ms >= 500) {
+    s_diag_ms = now;
+    named("LEAK", (t.flags & LT_FLAG_LEAK) ? 1.0f : 0.0f, now);
+    named("KILL", (t.flags & LT_FLAG_KILL) ? 1.0f : 0.0f, now);
+    named("WTEMP", (float)t.wtemp_c, now);
+    named("LORA_RSSI", (float)LoRa.packetRssi(), now);
+    named("LORA_RX", (float)s_rx_count, now);
+    // Uplink diagnostics (localise where a command dies): USB_RX = cmds the C3 got from
+    // Bondor; UP_TX = uplink packets the C3 sent; UL_RX = uplink msgs the board handled.
+    named("USB_RX", (float)s_usb_msgs, now);
+    named("UP_TX", (float)s_ul_tx, now);
+    named("UL_RX", (float)t.ul_rx, now);
+    // UL_DROP = uplink msgs lost to a full queue. Non-zero means Bondor is writing faster
+    // than the ~8 uplink slots/s the TDM scheme allows — the cause of "sometimes the
+    // parameter saves, sometimes it doesn't". It must stay 0 during a parameter import.
+    named("UL_DROP", (float)s_ul_drop, now);
+  }
 }
 
 void setup() {
@@ -338,14 +388,31 @@ void loop() {
     }
   }
 
-  // Cached-value heartbeat keep-alive to Bondor (~2 Hz) when telem frames stall, so the
+  // Cached-value heartbeat keep-alive to Bondor (~2 Hz) while telem frames stall, so the
   // link indicator stays steady with the LAST REAL mode/armed (no flicker, no false state).
-  if (s_have_state && now - s_last_frame_ms > 1000 && now - s_dl_hb_last >= 500) {
+  // Bounded by LINK_DEAD_MS — see the note there. Past that we stop, and Bondor's own
+  // heartbeat-age test drops the link.
+  const uint32_t frame_age = now - s_last_frame_ms;
+  if (s_have_state && frame_age > LINK_STALE_MS && frame_age < LINK_DEAD_MS &&
+      now - s_dl_hb_last >= 500) {
     s_dl_hb_last = now;
     mavlink_message_t m;
     uint8_t base = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED | (s_last_armed ? MAV_MODE_FLAG_SAFETY_ARMED : 0);
     mavlink_msg_heartbeat_pack(SYS_ID, COMP_ID, &m, MAV_TYPE_SUBMARINE, MAV_AUTOPILOT_GENERIC,
                                base, (uint32_t)s_last_mode, s_last_armed ? MAV_STATE_ACTIVE : MAV_STATE_STANDBY);
+    txMsg(m);
+  }
+
+  // Announce the loss once, on the edge, so the operator gets a reason rather than just a
+  // link indicator going out. Said over USB (which is still up) even though LoRa is not.
+  if (s_have_state && !s_link_dead && frame_age >= LINK_DEAD_MS) {
+    s_link_dead = true;
+    mavlink_message_t m;
+    // Both under 50 chars — MAVLink's STATUSTEXT.text is char[50] and the tail is dropped.
+    const char* txt = s_last_armed
+        ? "LoRa lost - vehicle was ARMED, state UNKNOWN"
+        : "LoRa lost - vehicle state UNKNOWN";
+    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &m, MAV_SEVERITY_CRITICAL, txt, 0, 0);
     txMsg(m);
   }
 
