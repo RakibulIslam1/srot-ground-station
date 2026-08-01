@@ -44,14 +44,20 @@ right place for it: **rev < 2 means `stop` does not stop.**
   companion is connected. The board clamps to a 20 ms floor and refuses a HEARTBEAT disable, so
   it cannot starve your `PARAM_VALUE` traffic — but the link is busier than it was.
 - **We read `AUTOPILOT_VERSION`** (msgid 148) at preflight and again at arm.
-- **We will adopt component id 191** (`MAV_COMP_ID_ONBOARD_COMPUTER`) instead of sharing
-  `255/190` with every GCS. **This is the change that affects you**, and it is in your favour:
-  today your LoRa bridge synthesises a filler heartbeat as `255/190`, identical to the
-  companion, so the board cannot tell you apart. That means **a dead Jetson with Bondor
-  connected holds the GCS failsafe open** and the vehicle station-keeps when it should surface.
-  Once we are on 191 the firmware can key the failsafe on the companion specifically. No
-  Bondor code change — but if anything of yours *asserts* the companion is `190`, it will stop
-  being true.
+- **We have adopted component id 191** (`MAV_COMP_ID_ONBOARD_COMPUTER`) instead of sharing
+  `255/190` with every GCS — **shipped**, `duburi_ws` `41318e7`. **This is the change that
+  affects you**, and it is in your favour: your LoRa bridge synthesises its filler heartbeat as
+  `255/190`, identical to what the companion used to send, so the board cannot tell you apart.
+  That means **a dead Jetson with Bondor connected holds the GCS failsafe open** and the
+  vehicle station-keeps when it should surface. With the companion on 191 the firmware can now
+  key `FS_GCS_SYSID`/`FS_GCS_COMPID` on it specifically — that work is requested in
+  `srot-control-board/TASKS_FROM_DUBURI_WS.md` §2.
+
+  **No Bondor code change is needed**, and nothing breaks in the meantime: the board counts any
+  heartbeat whose id is not its own (`mav_commands.cpp:687`), so 191 feeds the failsafe exactly
+  as 190 did. **But if anything of yours asserts the companion is `190`, it has stopped being
+  true** — and once `FS_GCS_*` lands, your bridge's `255/190` will no longer satisfy a failsafe
+  that is watching the Jetson. That is the point of the change, not a regression.
 
 ---
 
