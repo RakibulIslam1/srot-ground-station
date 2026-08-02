@@ -65,6 +65,27 @@ messages and would rather say so than assume.
 - **We refuse to arm while the depth controller is saturated.** Purely a companion-side
   backstop; it does not affect anything you send.
 
+## 4b. Payload — you own `SERVO{n}_ROLE`, and we now read it
+
+Each PCA9685 channel's role is a **Bondor-set firmware parameter**, and `duburi_ws` now reads
+it and **refuses to drive anything that is not role 2 (SWITCH)**. Read live from the vehicle:
+**channels 1-8 = SERVO (PWM), 9-16 = SWITCH.**
+
+This makes the Parameters tab load-bearing for payload safety: the PWM channels drive the
+on-board manipulator arm, and the only thing stopping a mission from actuating one is that
+role value. **If you re-role a channel, our behaviour follows automatically** — we keep no
+host-side copy, deliberately, because a stale copy's failure mode is moving the arm during a
+payload drop.
+
+Two things worth surfacing in the UI if you ever want them: which channels are switches, and a
+warning when a channel's role changes while a mission is connected.
+
+## 4c. Correction: PM1 was a parameter, not the wiring
+
+Our earlier note said PM1's ~1.35 V was the unwired GPIO36. **It was a wrong pin number in the
+SROT parameters.** The operator corrected it and PM1 now reads **13.95 V**; PM2 reads 14.62 V.
+Both packs are sensible, and Bondor's battery readouts should now be meaningful for both.
+
 ## 5. Standing rules, unchanged
 
 - **Do not relay `LANDING_TARGET` over LoRa** when the vision uplink lands.
