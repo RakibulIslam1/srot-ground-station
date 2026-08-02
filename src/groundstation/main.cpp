@@ -197,10 +197,7 @@ static void loraSend(const uint8_t* buf, uint16_t len) {
   LoRa.beginPacket();
   LoRa.write(buf, len);
   LoRa.endPacket();      // blocks until TX done
-  // NO LoRa.receive() here either — see setup(). parsePacket() in loop() is the sole RX
-  // driver; calling receive() puts the modem in continuous RX and the very next
-  // parsePacket() drags it back to RX_SINGLE, which is how the radio ended up not
-  // listening between passes.
+  LoRa.receive();        // back to RX (restored — see setup)
 }
 // One packet, one TDM slot. (This used to take a `reps` count and burst copies back-to-back
 // with a delay() between them, but every call site passed 1: loss tolerance is handled by
@@ -273,13 +270,15 @@ static void sendUplinkSlot() {
 static void txMsg(mavlink_message_t& m) {
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   uint16_t len = mavlink_msg_to_send_buffer(buf, &m);
-  // DROP rather than block. This is native USB CDC (ARDUINO_USB_CDC_ON_BOOT), and HWCDC's
-  // write() blocks up to its 250 ms TX timeout when the host stops draining — while loop()
-  // is blocked the radio is not being serviced at all, so a Bondor hiccup turns directly
-  // into lost LoRa frames and then into a "link lost" that never happened on the air.
-  // bridgeFrame() emits 6-15 of these per received frame, so the exposure is real.
-  // Losing one ATTITUDE is invisible; a quarter-second of radio blackout is not.
-  if ((int)Serial.availableForWrite() < (int)len) return;
+  // REVERTED: an availableForWrite() guard was added here to stop a stalled host from
+  // blocking the radio. It was never verified on hardware and it is not safe as written --
+  // when the CDC is not being drained availableForWrite() can sit at 0 indefinitely, so the
+  // guard drops EVERY message and the ground station goes silent rather than slow. That is a
+  // worse failure than the one it was preventing, and it is indistinguishable from a dead
+  // link at the Bondor end.
+  //
+  // The blocking-write concern is real and still open; the fix is an outbound ring buffer
+  // drained a bounded number of bytes per loop(), not a bare drop. Deferred deliberately.
   Serial.write(buf, len);
 }
 static void named(const char* name, float v, uint32_t t) {
@@ -414,11 +413,12 @@ void setup() {
   // The SX127x powers up with this OFF, so corrupted packets were reaching the decoder and
   // the MAVLink parser. BOTH boards must run with it enabled; reflash them together.
   LoRa.enableCrc();
-  // NO LoRa.receive() here. sandeepmistry's parsePacket() forces MODE_RX_SINGLE whenever the
-  // modem is not already in it, so mixing receive() (continuous) with parsePacket() leaves
-  // the radio in a mode neither call expects and it stops listening. The control board
-  // learned this (lora_mission.cpp) and got the fix; the ground station was left with the
-  // original mixture. parsePacket() in loop() is now the SOLE RX driver.
+  // RESTORED. Removing this (and the one in loraSend) to make parsePacket() the sole RX
+  // driver was an untested port of a control-board fix, and the ground station stopped
+  // behaving: the board reset hard enough to drop its USB CDC. The two radios do NOT run the
+  // same loop structure -- the control board polls from a task with its own RX window, this
+  // one polls from Arduino loop() -- so the fix does not transfer as written.
+  LoRa.receive();
 }
 
 void loop() {
@@ -443,16 +443,9 @@ void loop() {
         s_last_rx_ms = now;          // link is alive (see the flap-suppression note)
         // Reply FIRST (prompt, lands in the master's RX window) — only while Bondor's USB
         // is live, so the vehicle still detects GCS-loss if Bondor unplugs. Then bridge.
-        if (now - s_last_usb_ms < 2000) {
-          sendUplinkSlot();
-          // Re-arm RX immediately after transmitting, rather than waiting for the next
-          // loop() pass to reach parsePacket() — bridgeFrame() below writes 6-15 MAVLink
-          // messages to USB first, and every millisecond of that is a millisecond the
-          // one-shot RX is not armed. Same 70 ms tight-poll the control board uses
-          // (task_lora_sd.cpp), for the same reason.
-          uint32_t win = millis();
-          while (millis() - win < 20) { if (LoRa.parsePacket() > 0) break; delay(1); }
-        }
+        // Reply FIRST (prompt, lands in the master's RX window). The tight re-arm poll that
+        // was here is reverted with the RX-mode change above.
+        if (now - s_last_usb_ms < 2000) sendUplinkSlot();
         bridgeFrame(t);
       }
     } else if (n > 0 && pkt[0] == 0xFD) {
