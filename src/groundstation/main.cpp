@@ -70,6 +70,37 @@ static bool    s_link_dead = false;   // announced once per loss, cleared on rec
 static const uint32_t LINK_STALE_MS = 1000;    // start bridging the gap with cached state
 static const uint32_t LINK_DEAD_MS  = 5000;    // past here we do not know, so we do not say
 
+// --- link-flap suppression ---------------------------------------------------------------
+//
+// The operator saw "LoRa link lost" / "LoRa telemetry recovered" printed CONTINUOUSLY. Two
+// causes, both here:
+//
+// 1. WRONG INPUT. `s_last_frame_ms` is set only in bridgeFrame(), i.e. only for a telemetry
+//    frame that passes magic+length+CRC. The raw 0xFD relay branch (PARAM_VALUE / ACK /
+//    STATUSTEXT arriving over the air) never touched it -- so during a PARAMETER DOWNLOAD the
+//    ground station is receiving the vehicle continuously and still declares the link dead
+//    after 5 s. `s_last_rx_ms` below is the fix, and it is a SEPARATE variable on purpose:
+//    a PARAM_VALUE proves the RADIO is alive but says nothing about mode/armed, so it must
+//    NOT extend the licence to keep asserting cached vehicle state. One timer answers "is the
+//    link up", the other answers "do I still know what the vehicle is doing". Collapsing them
+//    would silence the spam and simultaneously let a param download prolong a stale "ARMED".
+//
+// 2. NO HYSTERESIS. 5 s of silence to declare dead, but ONE frame to declare recovered, and
+//    no rate limit on either announcement. A marginal link that lands one frame every ~6 s
+//    therefore produces exactly one lost+recovered pair per cycle, for ever.
+//
+// Loss stays prompt (asymmetric by design -- you want to hear about it immediately).
+// Recovery must be EARNED: 3 consecutive good telemetry frames AND 1 s of continuous link.
+static const uint32_t LINK_RECOVER_MS    = 1000;   // min continuous good link before "recovered"
+static const uint8_t  LINK_RECOVER_RUN   = 3;      // consecutive good frames required
+static const uint32_t LINK_ANNOUNCE_GAP  = 30000;  // at most one announcement per 30 s
+
+static uint32_t s_last_rx_ms      = 0;   // ANY good packet from the vehicle (telem OR 0xFD)
+static uint8_t  s_good_run        = 0;   // consecutive CRC-valid telemetry frames
+static uint32_t s_recover_start_ms = 0;  // when the current good run began
+static uint32_t s_last_announce_ms = 0;
+static uint16_t s_flaps           = 0;   // transitions suppressed by the rate limit
+
 // Accept only mode values this firmware actually defines. A frame that slips the CRC16 (or,
 // before the radio CRC was enabled, any corrupted frame at all) could otherwise paint an
 // arbitrary mode onto the GCS for one frame — ~125 ms, which is exactly the "wrong mode for
@@ -166,7 +197,10 @@ static void loraSend(const uint8_t* buf, uint16_t len) {
   LoRa.beginPacket();
   LoRa.write(buf, len);
   LoRa.endPacket();      // blocks until TX done
-  LoRa.receive();        // back to RX (the default state)
+  // NO LoRa.receive() here either — see setup(). parsePacket() in loop() is the sole RX
+  // driver; calling receive() puts the modem in continuous RX and the very next
+  // parsePacket() drags it back to RX_SINGLE, which is how the radio ended up not
+  // listening between passes.
 }
 // One packet, one TDM slot. (This used to take a `reps` count and burst copies back-to-back
 // with a delay() between them, but every call site passed 1: loss tolerance is handled by
@@ -239,6 +273,13 @@ static void sendUplinkSlot() {
 static void txMsg(mavlink_message_t& m) {
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   uint16_t len = mavlink_msg_to_send_buffer(buf, &m);
+  // DROP rather than block. This is native USB CDC (ARDUINO_USB_CDC_ON_BOOT), and HWCDC's
+  // write() blocks up to its 250 ms TX timeout when the host stops draining — while loop()
+  // is blocked the radio is not being serviced at all, so a Bondor hiccup turns directly
+  // into lost LoRa frames and then into a "link lost" that never happened on the air.
+  // bridgeFrame() emits 6-15 of these per received frame, so the exposure is real.
+  // Losing one ATTITUDE is invisible; a quarter-second of radio blackout is not.
+  if ((int)Serial.availableForWrite() < (int)len) return;
   Serial.write(buf, len);
 }
 static void named(const char* name, float v, uint32_t t) {
@@ -259,12 +300,29 @@ static void bridgeFrame(const LoraTelem& t) {
   s_last_armed = (t.flags & LT_FLAG_ARMED) != 0;
   s_last_frame_ms = now;
   s_have_state = true;
-  if (s_link_dead) {   // recovered — say so, since the loss was announced
+
+  // Recovery has to be EARNED — see the flap-suppression note above. One good frame is not
+  // evidence of a working link, it is evidence of one good frame.
+  if (s_good_run == 0) s_recover_start_ms = now;
+  if (s_good_run < 255) s_good_run++;
+
+  if (s_link_dead && s_good_run >= LINK_RECOVER_RUN &&
+      (now - s_recover_start_ms) >= LINK_RECOVER_MS) {
     s_link_dead = false;
-    mavlink_message_t r;
-    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &r, MAV_SEVERITY_INFO,
-                                "LoRa telemetry recovered", 0, 0);
-    txMsg(r);
+    if (now - s_last_announce_ms >= LINK_ANNOUNCE_GAP) {
+      s_last_announce_ms = now;
+      char txt[50];
+      // Carry the suppressed-transition count: on a marginal link that number IS the
+      // diagnosis, and it is strictly more useful than the stream of pairs it replaces.
+      if (s_flaps) snprintf(txt, sizeof(txt), "LoRa recovered (%u flaps suppressed)", s_flaps);
+      else         snprintf(txt, sizeof(txt), "LoRa telemetry recovered");
+      s_flaps = 0;
+      mavlink_message_t r;
+      mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &r, MAV_SEVERITY_INFO, txt, 0, 0);
+      txMsg(r);
+    } else if (s_flaps < 65535) {
+      s_flaps++;
+    }
   }
 
   // HEARTBEAT with the REAL mode/armed (4 Hz, from frames) — the only heartbeat we
@@ -356,7 +414,11 @@ void setup() {
   // The SX127x powers up with this OFF, so corrupted packets were reaching the decoder and
   // the MAVLink parser. BOTH boards must run with it enabled; reflash them together.
   LoRa.enableCrc();
-  LoRa.receive();
+  // NO LoRa.receive() here. sandeepmistry's parsePacket() forces MODE_RX_SINGLE whenever the
+  // modem is not already in it, so mixing receive() (continuous) with parsePacket() leaves
+  // the radio in a mode neither call expects and it stops listening. The control board
+  // learned this (lora_mission.cpp) and got the fix; the ground station was left with the
+  // original mixture. parsePacket() in loop() is now the SOLE RX driver.
 }
 
 void loop() {
@@ -378,12 +440,27 @@ void loop() {
       memcpy(&t, pkt, sizeof(t));
       if (t.magic1 == LORA_TELEM_MAGIC1 && lora_telem_crc(&t) == t.crc) {
         s_rx_count++;
+        s_last_rx_ms = now;          // link is alive (see the flap-suppression note)
         // Reply FIRST (prompt, lands in the master's RX window) — only while Bondor's USB
         // is live, so the vehicle still detects GCS-loss if Bondor unplugs. Then bridge.
-        if (now - s_last_usb_ms < 2000) sendUplinkSlot();
+        if (now - s_last_usb_ms < 2000) {
+          sendUplinkSlot();
+          // Re-arm RX immediately after transmitting, rather than waiting for the next
+          // loop() pass to reach parsePacket() — bridgeFrame() below writes 6-15 MAVLink
+          // messages to USB first, and every millisecond of that is a millisecond the
+          // one-shot RX is not armed. Same 70 ms tight-poll the control board uses
+          // (task_lora_sd.cpp), for the same reason.
+          uint32_t win = millis();
+          while (millis() - win < 20) { if (LoRa.parsePacket() > 0) break; delay(1); }
+        }
         bridgeFrame(t);
       }
     } else if (n > 0 && pkt[0] == 0xFD) {
+      // A relayed MAVLink frame is proof the radio link is up even though it carries no
+      // vehicle state. Counting it here is what stops a parameter download from being
+      // mistaken for five seconds of silence. It deliberately does NOT touch
+      // s_last_frame_ms — that one still governs how long we may assert cached mode/armed.
+      s_last_rx_ms = now;
       Serial.write(pkt, n);   // raw MAVLink downlink → Bondor parses it natively
     }
   }
@@ -393,6 +470,7 @@ void loop() {
   // Bounded by LINK_DEAD_MS — see the note there. Past that we stop, and Bondor's own
   // heartbeat-age test drops the link.
   const uint32_t frame_age = now - s_last_frame_ms;
+  const uint32_t rx_age    = now - s_last_rx_ms;    // link liveness, incl. 0xFD relay traffic
   if (s_have_state && frame_age > LINK_STALE_MS && frame_age < LINK_DEAD_MS &&
       now - s_dl_hb_last >= 500) {
     s_dl_hb_last = now;
@@ -405,15 +483,22 @@ void loop() {
 
   // Announce the loss once, on the edge, so the operator gets a reason rather than just a
   // link indicator going out. Said over USB (which is still up) even though LoRa is not.
-  if (s_have_state && !s_link_dead && frame_age >= LINK_DEAD_MS) {
+  // Keyed on rx_age, NOT frame_age: a parameter download is not a dead link.
+  if (s_have_state && !s_link_dead && rx_age >= LINK_DEAD_MS) {
     s_link_dead = true;
-    mavlink_message_t m;
-    // Both under 50 chars — MAVLink's STATUSTEXT.text is char[50] and the tail is dropped.
-    const char* txt = s_last_armed
-        ? "LoRa lost - vehicle was ARMED, state UNKNOWN"
-        : "LoRa lost - vehicle state UNKNOWN";
-    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &m, MAV_SEVERITY_CRITICAL, txt, 0, 0);
-    txMsg(m);
+    s_good_run  = 0;                     // recovery must earn its 3 frames again
+    if (now - s_last_announce_ms >= LINK_ANNOUNCE_GAP) {
+      s_last_announce_ms = now;
+      mavlink_message_t m;
+      // Under 50 chars — MAVLink's STATUSTEXT.text is char[50] and the tail is dropped.
+      const char* txt = s_last_armed
+          ? "LoRa lost - vehicle was ARMED, state UNKNOWN"
+          : "LoRa lost - vehicle state UNKNOWN";
+      mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &m, MAV_SEVERITY_CRITICAL, txt, 0, 0);
+      txMsg(m);
+    } else if (s_flaps < 65535) {
+      s_flaps++;
+    }
   }
 
   if (s_led_off_at && now >= s_led_off_at) {
