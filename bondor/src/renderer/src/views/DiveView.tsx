@@ -109,7 +109,31 @@ export default function DiveView(): JSX.Element {
                 <Tile label="Depth" value={t.depth.toFixed(2)} unit="m" />
                 <Tile label="Battery 1" value={t.battVolt.toFixed(1)} unit="V" sub={`${t.battCurr.toFixed(1)} A`} />
                 <Tile label="Battery 2" value={t.battVolt2 > 0 ? t.battVolt2.toFixed(1) : '—'} unit="V" />
-                <Tile label="Water" value={(t.named['WTEMP'] ?? 0).toFixed(1)} unit="°C" />
+                {/* ABSENCE IS DATA -- do not render a withheld value as 0.
+                    From fw rev 3 the board SUPPRESSES WTEMP (and SCALED_PRESSURE2)
+                    when the barometer is unhealthy or stale, rather than publishing a
+                    number it cannot stand behind. `?? 0` turned that deliberate silence
+                    into a confident "0.0 °C" -- re-creating on this screen exactly the
+                    bug the firmware suppression was written to fix. Rev 5's baro jitter
+                    gate makes the suppression far more likely to fire, so this went from
+                    theoretical to routine. */}
+                <Tile
+                  label="Water"
+                  value={t.named['WTEMP'] !== undefined ? t.named['WTEMP'].toFixed(1) : '—'}
+                  unit="°C"
+                />
+                {/* Baro peak-to-peak over the board's jitter window (fw rev 5). Published
+                    UNGATED precisely so it can explain why Water/Depth just went to '—':
+                    over ~15 mbar the board declares the barometer unhealthy and refuses
+                    DEPTH_HOLD/AUTO. On a healthy bench this reads a few mbar. */}
+                <Tile
+                  label="Baro p2p"
+                  value={
+                    t.named['BARO_P2P'] !== undefined ? t.named['BARO_P2P'].toFixed(1) : '—'
+                  }
+                  unit="mbar"
+                  warn={(t.named['BARO_P2P'] ?? 0) > 15}
+                />
                 <Tile label="Leak" value={t.named['LEAK'] ? 'LEAK' : 'dry'} warn={!!t.named['LEAK']} />
                 {/* Firmware behaviour revision. Below FW_BEHAVIOUR_REV_REQUIRED, MOVE_STOP
                     coasts -- stop and abort apply ZERO braking thrust -- and duburi_ws has

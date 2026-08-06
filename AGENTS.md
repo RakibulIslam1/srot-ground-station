@@ -147,3 +147,29 @@ the companion of telemetry and command ACKs. `UdpLink` probes the port BEFORE bi
 raises a persistent `conflict` that incoming data does not clear — data arriving is not
 evidence the problem is gone, it is evidence we took someone else's. Do not "fix" that by
 clearing `conflict` on first message.
+
+## Absence is data (fw rev 3+, and rev 5 makes it routine)
+
+The board SUPPRESSES `WTEMP` and `SCALED_PRESSURE2` when the barometer is unhealthy or
+stale, rather than publishing a value it cannot stand behind. Rendering a missing named
+value as `0` re-creates on our screen exactly the bug that suppression was written to fix.
+
+`DiveView` did this: `(named['WTEMP'] ?? 0).toFixed(1)` showed a confident **0.0 °C** for a
+value the firmware had deliberately withheld. Rev 5's baro JITTER gate (peak-to-peak > 15
+mbar over 8 samples marks the baro unhealthy) makes that suppression fire routinely rather
+than theoretically. Every named-value tile must render `—` when the key is `undefined`;
+`LoraView` already had the right pattern.
+
+`BARO_P2P` (rev 5) is published UNGATED so it can explain WHY depth/water withdrew. It is
+on the Dive screen with a warn threshold at 15 mbar.
+
+## After flashing the board, the BlueOS bridge is dead but still LOOKS alive
+
+A Bridget bridge holds an open fd on `/dev/ttyUSB0`. Flashing re-enumerates the USB device,
+so the fd dies -- but the bridge is still listed, the serial port is still listed, and the
+API answers exactly as it does when healthy. Nothing is visibly wrong and no data flows;
+Bondor sits on "listening — no data from the vehicle yet".
+
+Fix is to delete and re-POST the identical bridge. duburi_ws's `connect` /
+`duburi_manager start` now print the exact two curl commands when this happens
+(`connection_config.diagnose_bridge`).
