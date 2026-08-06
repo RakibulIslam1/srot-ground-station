@@ -7,6 +7,16 @@
 // Bondor identifies as a GCS.
 export const GCS_SYSTEM_ID = 255
 export const GCS_COMPONENT_ID = 190
+// duburi_ws identifies as MAV_COMP_ID_ONBOARD_COMPUTER on the same sysid. The board's
+// FS_GCS_SYSID/FS_GCS_COMPID default to 255/191, i.e. the companion specifically -- which
+// is the whole point: a dead Jetson with Bondor still connected must SURFACE, and that is
+// impossible if the board cannot tell the two of us apart. Mirrored from duburi_ws
+// srot_protocol.SOURCE_COMPID.
+export const COMPANION_COMPONENT_ID = 191
+// FS_GCS_* wildcard. The firmware's matchesCompanion() treats a 0 field as "any", so
+// FS_GCS_COMPID = 0 lets Bondor's heartbeat satisfy the companion failsafe -- the
+// documented escape hatch for bench work. See BENCH MODE in DiveView.
+export const FS_GCS_WILDCARD = 0
 // The SROT vehicle.
 export const TARGET_SYSTEM_ID = 1
 export const TARGET_COMPONENT_ID = 1

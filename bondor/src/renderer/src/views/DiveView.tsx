@@ -22,6 +22,8 @@ import {
   FLIGHT_MODE_LABELS,
   FlightMode,
   FW_BEHAVIOUR_REV_REQUIRED,
+  COMPANION_COMPONENT_ID,
+  FS_GCS_WILDCARD,
   GCS_COMPONENT_ID,
   GCS_SYSTEM_ID
 } from '../../../shared/protocol'
@@ -110,6 +112,10 @@ export default function DiveView(): JSX.Element {
     fsSys !== undefined &&
     fsComp !== undefined &&
     ((fsSys !== 0 && fsSys !== GCS_SYSTEM_ID) || (fsComp !== 0 && fsComp !== GCS_COMPONENT_ID))
+  // Bench mode is ON when the compid is wildcarded, i.e. any GCS -- including us --
+  // satisfies the companion failsafe.
+  const benchMode = fsEnabled && fsComp === FS_GCS_WILDCARD
+  const setParam = useTelemetry((s) => s.setParam)
 
   return (
     <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', lg: '1fr 340px' }, height: '100%', minHeight: 0 }}>
@@ -197,7 +203,48 @@ export default function DiveView(): JSX.Element {
                 &quot;companion lost&quot; after ~5 s and the board switches to SURFACE and
                 drives the vertical thrusters. Configure and calibrate here freely — just
                 do not ARM unless duburi_ws is also running, the board has been
-                power-cycled, or you set FS_GCS_COMPID = 0 (wildcard) for bench work.
+                power-cycled, or you enable bench mode below.
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    disabled={!connected}
+                    onClick={() => setParam('FS_GCS_COMPID', FS_GCS_WILDCARD)}
+                  >
+                    Enable bench mode (FS_GCS_COMPID = 0)
+                  </Button>
+                </Box>
+              </Alert>
+            )}
+
+            {/* BENCH MODE. Motor-direction work needs DO_MOTOR_TEST, which the firmware
+                hard-gates on armed -- so "Bondor alone" genuinely requires arming, and
+                arming requires the companion failsafe to be satisfiable by us.
+                Wildcarding the compid does exactly that and nothing more: the failsafe
+                still runs, it just accepts any component on the configured sysid.
+                NOT SAVED, deliberately -- a PARAM_SET is runtime-only, so a power cycle
+                restores the flight value on its own. That makes the safe state the
+                default and forgetting harmless. */}
+            {benchMode && (
+              <Alert severity="info" sx={{ mb: 1.5 }}>
+                <b>Bench mode active</b> — FS_GCS_COMPID is wildcarded, so Bondor&apos;s own
+                heartbeat satisfies the companion failsafe. Arming, motor test and motor
+                direction all work with Bondor alone. <b>Not for an autonomous run:</b> a
+                dead companion can no longer be told apart from a live GCS, so the vehicle
+                would station-keep instead of surfacing. This is runtime-only and reverts on
+                the next board reboot — <b>but do NOT press Save on the Parameters tab while
+                it is active</b>, or it becomes permanent.
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    disabled={!connected}
+                    onClick={() => setParam('FS_GCS_COMPID', COMPANION_COMPONENT_ID)}
+                  >
+                    Restore flight config (FS_GCS_COMPID = {COMPANION_COMPONENT_ID})
+                  </Button>
+                </Box>
               </Alert>
             )}
             <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>

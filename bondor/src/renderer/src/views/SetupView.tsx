@@ -181,6 +181,16 @@ function MotorsTab(): JSX.Element {
           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
             Thruster direction (reverse)
           </Typography>
+          {/* Motor test is hard-gated on armed in the firmware ("Arm motors before
+              testing motors"), so verifying a direction with Bondor alone means arming
+              -- and arming trips the companion failsafe unless FS_GCS_COMPID accepts us.
+              The Dive tab carries the one-click bench-mode toggle and the explanation. */}
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            Verifying a direction needs <b>Motor test</b>, which the board only allows
+            while <b>armed</b>. Using Bondor on its own? Enable <b>bench mode</b> from the
+            banner on the Dive tab first, or arming will trip the companion failsafe and
+            the board will surface.
+          </Typography>
           <ParamGroups groups={['Motors & Frame']} defaultOpen="Motors & Frame" />
         </CardContent>
       </Card>

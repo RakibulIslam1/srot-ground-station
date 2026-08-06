@@ -192,3 +192,22 @@ thrusters (5-8), which reads as "arming spun the motors on its own".
 match Bondor's own and the failsafe is enabled. Do not "fix" this by making Bondor send
 191 — distinguishing the companion from the ground station is the entire point of those
 params, and a dead Jetson with Bondor connected must still surface.
+
+### BENCH MODE — standalone Bondor, including motor direction
+
+Motor-direction work needs `DO_MOTOR_TEST`, which the firmware **hard-gates on armed**
+("Arm motors before testing motors"). So standalone Bondor genuinely requires arming, and
+arming requires the companion failsafe to be satisfiable by us.
+
+The toggle on the Dive tab sets `FS_GCS_COMPID = 0`, the firmware's documented wildcard:
+the failsafe still runs, it just accepts any component on the configured sysid. Everything
+else — params, tuning, calibration, payload roles, export — needs no arming at all and
+works regardless.
+
+Three properties make this safe, and none should be "tidied away":
+1. It is a **PARAM_SET only, never PREFLIGHT_STORAGE**, so a power cycle restores the
+   flight value by itself. The safe state is the default and forgetting is harmless.
+2. The banner says plainly that **pressing Save on the Parameters tab makes it permanent** —
+   which matters because the take-turns runbook tells operators to Save for payload roles.
+3. A restore button is offered whenever the wildcard is active, so the state is never
+   invisible.
