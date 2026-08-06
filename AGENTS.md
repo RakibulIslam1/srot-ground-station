@@ -120,3 +120,30 @@ When that lands, Bondor should:
   only makes sense on the direct link anyway.
 
 No change is required until the firmware side exists.
+
+## Payload channel FUNCTION (added 2026-08-06)
+
+`SERVOn_ROLE` is the AUTHORITY (what the board drives); `SERVOn_FUNCTION` is the IDENTITY
+(what duburi_ws calls the channel). Orthogonal — setting a Function never makes a channel
+fireable, only `ROLE = 2` does.
+
+The firmware deliberately does not read `servo_func`; it is NVS storage so the payload map
+lives on the board and travels with the hull, instead of in a host-side table that goes
+stale the moment someone re-wires a channel. Canonical numbers are `SROT_SERVO_FUNC_*` in
+the firmware's `include/config.h`; our mirror is `SERVO_FUNCTIONS` in
+`bondor/src/shared/protocol.ts`, and the `name` field is what makes it checkable.
+
+**APPEND-ONLY.** Three repos mirror these by hand; inserting a value silently renames every
+payload after it. duburi_ws's `test_srot_protocol_drift` referees all three copies including
+ours — we have no firmware-aware gate of our own, so that test is the only thing that will
+catch a Bondor-side drift.
+
+## UDP: the port is exclusive in practice
+
+MEASURED: two processes both binding 14550 with `SO_REUSEADDR` — which we do and pymavlink
+does — both succeed, and **the newcomer takes the stream** (544 datagrams vs a trickle over
+6 s). So connecting Bondor on top of a running duburi_ws does not fail; it silently starves
+the companion of telemetry and command ACKs. `UdpLink` probes the port BEFORE binding and
+raises a persistent `conflict` that incoming data does not clear — data arriving is not
+evidence the problem is gone, it is evidence we took someone else's. Do not "fix" that by
+clearing `conflict` on first message.

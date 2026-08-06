@@ -27,7 +27,7 @@ import {
   type ParamSetArgs,
   type MavMessage
 } from '../../shared/protocol'
-import type { MavlinkLink } from './link'
+import type { LinkStatus, MavlinkLink } from './link'
 import { UdpLink } from './udpLink'
 import { SerialLink } from './serialLink'
 
@@ -96,7 +96,7 @@ export class MavlinkConnection {
 
     const cb = {
       onData: (buf: Buffer) => this.splitter?.write(buf),
-      onStatus: (s: { connected: boolean; detail?: string; error?: string }) => {
+      onStatus: (s: LinkStatus) => {
         this.setStatus({ ...s, kind: opts.kind })
         if (s.connected) this.startHeartbeat()
         else this.stopHeartbeat()

@@ -29,6 +29,10 @@ const api = {
   requestParamReadIndex: (index: number): Promise<void> =>
     ipcRenderer.invoke(IPC.REQUEST_PARAM_READ_INDEX, index),
   listSerialPorts: (): Promise<SerialPortInfo[]> => ipcRenderer.invoke(IPC.LIST_SERIAL_PORTS),
+  getSettings: (): Promise<{ lastConnection?: ConnectOptions }> =>
+    ipcRenderer.invoke(IPC.GET_SETTINGS),
+  setSettings: (s: { lastConnection?: ConnectOptions }): Promise<void> =>
+    ipcRenderer.invoke(IPC.SET_SETTINGS, s),
 
   onMessage: (cb: (m: MavMessage) => void): (() => void) => {
     const h = (_e: unknown, m: MavMessage) => cb(m)

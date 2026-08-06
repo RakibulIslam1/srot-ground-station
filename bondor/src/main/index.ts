@@ -7,6 +7,7 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'node:path'
 import { MavlinkConnection } from './mavlink/connection'
 import { listSerialPorts } from './mavlink/serialLink'
+import { readSettings, writeSettings, type BondorSettings } from './settings'
 import {
   IPC,
   type ConnectOptions,
@@ -57,6 +58,8 @@ function createWindow(): void {
   ipcMain.handle(IPC.REQUEST_PARAM_READ, (_e, id: string) => conn.requestParamRead(id))
   ipcMain.handle(IPC.REQUEST_PARAM_READ_INDEX, (_e, index: number) => conn.requestParamReadIndex(index))
   ipcMain.handle(IPC.LIST_SERIAL_PORTS, () => listSerialPorts())
+  ipcMain.handle(IPC.GET_SETTINGS, () => readSettings())
+  ipcMain.handle(IPC.SET_SETTINGS, (_e, s: BondorSettings) => writeSettings(s))
 
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {

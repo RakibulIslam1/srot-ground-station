@@ -12,16 +12,17 @@ import {
   Typography
 } from '@mui/material'
 import { useTelemetry } from '../store/telemetry'
+import { SERVO_FUNCTIONS, SERVO_ROLES } from '../../../shared/protocol'
 
-const ROLES = [
-  { value: 0, label: 'Off' },
-  { value: 1, label: 'Servo (PWM)' },
-  { value: 2, label: 'Switch (on/off)' }
-]
+// Roles and functions come from shared/protocol.ts -- the one GCS mirror of the
+// firmware's config.h. They used to be a local literal here, which is how a third
+// copy of a co-owned constant gets born.
+const ROLES = SERVO_ROLES
 
 function Channel({ ch }: { ch: number }): JSX.Element {
   // ch is 1-based (SERVO1..16 → DO_SET_SERVO channel 1..16).
   const role = useTelemetry((s) => s.paramValues[`SERVO${ch}_ROLE`])
+  const func = useTelemetry((s) => s.paramValues[`SERVO${ch}_FUNCTION`])
   const min = useTelemetry((s) => s.paramValues[`SERVO${ch}_MIN`]) ?? 1100
   const max = useTelemetry((s) => s.paramValues[`SERVO${ch}_MAX`]) ?? 1900
   const trim = useTelemetry((s) => s.paramValues[`SERVO${ch}_TRIM`]) ?? 1500
@@ -49,6 +50,26 @@ function Channel({ ch }: { ch: number }): JSX.Element {
             sx={{ minWidth: 150 }}
           >
             {ROLES.map((o) => (
+              <MenuItem key={o.value} value={o.value}>
+                {o.label}
+              </MenuItem>
+            ))}
+          </TextField>
+
+          {/* IDENTITY, not authority. The firmware never reads SERVOn_FUNCTION --
+              it is storage so the payload map lives on the board and travels with
+              the hull, instead of in a host-side table that goes stale the moment
+              someone re-wires a channel. duburi_ws reads it at bring-up. */}
+          <TextField
+            select
+            size="small"
+            label="Function"
+            value={func ?? 0}
+            disabled={!connected || func === undefined}
+            onChange={(e) => setParam(`SERVO${ch}_FUNCTION`, Number(e.target.value))}
+            sx={{ minWidth: 150 }}
+          >
+            {SERVO_FUNCTIONS.map((o) => (
               <MenuItem key={o.value} value={o.value}>
                 {o.label}
               </MenuItem>
@@ -109,9 +130,13 @@ export default function PayloadView(): JSX.Element {
   return (
     <Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 720 }}>
-        Configure each PCA9685 aux channel's role and test it live. <b>Servo</b> channels get a µs
-        slider; <b>Switch</b> channels (MOSFET/relay) get an on/off toggle. Roles and MIN/MAX/TRIM are
-        saved params (Save on the Parameters tab to persist).
+        Configure each PCA9685 aux channel and test it live. <b>Role</b> is the authority — it
+        decides what the board will actually drive: <b>Servo</b> channels get a µs slider,{' '}
+        <b>Switch</b> channels (MOSFET/relay) get an on/off toggle, and only a Switch channel can
+        be fired by the companion. <b>Function</b> is the identity — what duburi_ws calls the
+        channel when it reads the payload map off the board at bring-up. The two are independent:
+        setting a Function does <b>not</b> make a channel fireable. All of these are saved params —
+        press <b>Save</b> on the Parameters tab or they are lost on reboot.
       </Typography>
       {!loaded ? (
         <Typography variant="body2" color="text.secondary">

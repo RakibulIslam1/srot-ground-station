@@ -90,6 +90,34 @@ export enum MavResult {
 
 // ---- IPC payloads -----------------------------------------------------------
 
+// ---- PCA9685 payload channels -------------------------------------------------
+// Mirrors the firmware's include/config.h. ROLE is the AUTHORITY (what the board
+// will actually drive); FUNCTION is the IDENTITY (what duburi_ws calls it). They are
+// orthogonal: setting a FUNCTION never makes a channel fireable.
+//
+// ⚠ APPEND-ONLY. Hand-mirrored in three repos -- firmware include/config.h
+// (canonical), duburi_ws fc/srot_protocol.py, and here. Inserting a value silently
+// renames every payload after it. duburi_ws's test_srot_protocol_drift referees all
+// three, including this file.
+export const SERVO_ROLES = [
+  { value: 0, label: 'Off' },
+  { value: 1, label: 'Servo (PWM)' },
+  { value: 2, label: 'Switch (on/off)' }
+] as const
+
+// `name` is the firmware's own suffix (SROT_SERVO_FUNC_<name>) and is what makes
+// this a checkable mirror rather than a coincidence of numbers -- duburi_ws's drift
+// test greps for `NAME: value` here. `label` is only what the operator reads.
+export const SERVO_FUNCTIONS = [
+  { value: 0, name: 'NONE', label: 'Unassigned' },
+  { value: 1, name: 'TORPEDO', label: 'Torpedo' },
+  { value: 2, name: 'DROPPER', label: 'Dropper' },
+  { value: 3, name: 'GRIPPER', label: 'Gripper' },
+  { value: 4, name: 'LIGHT', label: 'Light' },
+  { value: 5, name: 'CAMERA', label: 'Camera' },
+  { value: 6, name: 'AUX', label: 'Aux' }
+] as const
+
 export interface ConnectOptions {
   kind: 'udp' | 'serial' | 'mavlink2rest'
   // udp: bind locally and talk to the vehicle at host:port (or listen-only if host omitted)
@@ -145,6 +173,13 @@ export interface ConnectionStatus {
   kind?: ConnectOptions['kind']
   detail?: string
   error?: string
+  // Transport is open but the vehicle has not said anything yet, with the reason.
+  // `connected` alone cannot express this on UDP, where bind always succeeds --
+  // see LinkStatus in main/mavlink/link.ts.
+  waiting?: string
+  // Another process already held our port when we connected. Persistent: arriving
+  // data does not clear it. See LinkStatus in main/mavlink/link.ts.
+  conflict?: string
 }
 
 // IPC channel names.
@@ -159,6 +194,8 @@ export const IPC = {
   REQUEST_PARAM_READ_INDEX: 'bondor:requestParamReadIndex',
   LIST_SERIAL_PORTS: 'bondor:listSerialPorts',
   GET_STATUS: 'bondor:getStatus',
+  GET_SETTINGS: 'bondor:getSettings',
+  SET_SETTINGS: 'bondor:setSettings',
   // events (main → renderer)
   EVT_MESSAGE: 'bondor:message',
   EVT_STATUS: 'bondor:status'

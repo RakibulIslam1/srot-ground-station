@@ -64,20 +64,51 @@ export default function ConnectionBar({ title }: { title: string }): JSX.Element
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, kind])
 
+  // Restore the last connection ONCE at mount. The useState initialisers above are
+  // synchronous and IPC is not, so this cannot be done there.
+  //
+  // Restores the FIELDS ONLY -- it deliberately does not auto-connect. Bondor and
+  // duburi_ws take turns on one UDP port, and an unattended reconnect at launch is
+  // exactly how you end up silently starving a running mission (see the PORT
+  // CONFLICT warning).
+  useEffect(() => {
+    let cancelled = false
+    void window.bondor.getSettings().then((cfg) => {
+      const last = cfg?.lastConnection
+      if (cancelled || !last) return
+      if (last.kind) setKind(last.kind)
+      if (last.localPort !== undefined) setLocalPort(String(last.localPort))
+      if (last.host !== undefined) setHost(last.host)
+      if (last.port !== undefined) setPort(String(last.port))
+      if (last.path !== undefined) setPath(last.path)
+      if (last.baud !== undefined) setBaud(String(last.baud))
+      if (last.url !== undefined) setUrl(last.url)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const doConnect = (): void => {
+    let opts: ConnectOptions
     if (kind === 'udp') {
-      connect({
+      opts = {
         kind,
         localPort: Number(localPort) || 14550,
         host: host.trim() || undefined,
         port: host.trim() ? Number(port) || 14550 : undefined
-      })
+      }
     } else if (kind === 'serial') {
       if (!path) return
-      connect({ kind, path, baud: Number(baud) || 115200 })
+      opts = { kind, path, baud: Number(baud) || 115200 }
     } else {
-      connect({ kind, url })
+      opts = { kind, url }
     }
+    connect(opts)
+    // Persist on ATTEMPT, not on success: the settings worth restoring are the ones
+    // you typed, and a connection that failed is exactly the one you want back in
+    // the fields to fix. Never persist the unimplemented transport.
+    if (opts.kind !== 'mavlink2rest') void window.bondor.setSettings({ lastConnection: opts })
     setOpen(false)
   }
 
@@ -117,6 +148,35 @@ export default function ConnectionBar({ title }: { title: string }): JSX.Element
           </Typography>
         )}
 
+        {/* We took a port someone else was already using. Rendered as an ERROR chip
+            rather than a caption because the victim is the OTHER process: Bondor is
+            receiving fine while a running mission is being starved of telemetry and
+            command ACKs. Nothing else in either UI would say so. */}
+        {status.conflict && (
+          <Chip
+            size="small"
+            color="error"
+            variant="filled"
+            label="PORT CONFLICT"
+            title={status.conflict}
+          />
+        )}
+
+        {/* Transport open but silent. On UDP `connected` cannot express this -- bind
+            always succeeds -- so without this line a dead bridge and a wrong port
+            both look like a healthy connection that simply shows nothing. */}
+        {!status.error && status.waiting && (
+          <Typography
+            variant="caption"
+            color="warning.main"
+            sx={{ maxWidth: 320 }}
+            noWrap
+            title={status.waiting}
+          >
+            {status.waiting}
+          </Typography>
+        )}
+
         {connected ? (
           <Button color="inherit" startIcon={<LinkOffIcon />} onClick={disconnect}>
             Disconnect
@@ -136,7 +196,9 @@ export default function ConnectionBar({ title }: { title: string }): JSX.Element
               onChange={(e) => setKind(e.target.value as ConnectOptions['kind'])}>
               <MenuItem value="serial">USB (serial)</MenuItem>
               <MenuItem value="udp">Direct UDP</MenuItem>
-              <MenuItem value="mavlink2rest">BlueOS MAVLink2Rest (soon)</MenuItem>
+              <MenuItem value="mavlink2rest" disabled>
+                BlueOS MAVLink2Rest (not implemented)
+              </MenuItem>
             </TextField>
 
             {kind === 'serial' && (

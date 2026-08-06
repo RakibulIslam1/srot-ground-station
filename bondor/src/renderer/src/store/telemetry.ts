@@ -333,15 +333,21 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
     //     start flowing after it decodes its first downlink frame, so importing before the
     //     vehicle is up — the ordinary pre-dive workflow — sampled an empty `named` and chose
     //     the fast profile for the whole import. That is precisely the overrun being fixed.
-    //  2. "No telemetry at all yet" is treated as LoRa, not as USB. A direct board streams its
-    //     own named values within ~500 ms of connecting, so an empty `named` means we have not
-    //     heard from anything and must not assume the fast link. Guessing wrong toward slow
-    //     costs a minute on an import that works; guessing wrong toward fast loses parameters.
+    //  2. "No telemetry at all yet" is treated as LoRa ONLY ON A SERIAL LINK. Point 1 above
+    //     is the reason: the bridge IS a USB serial port, so a UDP link cannot be a LoRa hop
+    //     however quiet it is. The clause used to be unconditional, which meant every fresh
+    //     UDP connect -- the ordinary pre-dive workflow over BlueOS -- paced a ~230-param
+    //     import at 4 per 1200 ms for no reason at all. Guessing wrong toward slow costs a
+    //     minute; guessing wrong toward fast loses parameters, so the caution is kept exactly
+    //     where it can still be a radio.
     //  3. A stale LORA_* from an earlier session in the same app run only ever over-paces a
     //     direct link, which is safe.
     const linkProfile = (): { perBatch: number; gap: number; settle: number } => {
       const n = get().named
-      const lora = n.LORA_RSSI !== undefined || n.LORA_RX !== undefined || Object.keys(n).length === 0
+      const lora =
+        n.LORA_RSSI !== undefined ||
+        n.LORA_RX !== undefined ||
+        (kind === 'serial' && Object.keys(n).length === 0)
       if (lora) return { perBatch: 4, gap: 1200, settle: 2500 }
       return { perBatch: 8, gap: kind === 'serial' ? 400 : 700, settle: kind === 'serial' ? 900 : 1800 }
     }
