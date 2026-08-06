@@ -10,6 +10,15 @@ import type { LinkCallbacks, MavlinkLink } from './link'
 // board heartbeats at >=1 Hz and bursts NAMED_VALUE_FLOAT every 500 ms, so this is
 // ~4 missed heartbeats -- clear of the ~8-9% frame loss seen over the BlueOS bridge,
 // and well inside the patience of someone watching a status chip.
+// Silence beyond this, AFTER data has been flowing, is reported as a stall. Generous
+// relative to the vehicle's 1 Hz heartbeat so a couple of dropped frames do not flap it --
+// the same lesson as the LoRa link-status flapping.
+const STALL_MS = 4000
+const STALL_POLL_MS = 1000
+// Reopen backoff bounds.
+const RECONNECT_MIN_MS = 1000
+const RECONNECT_MAX_MS = 15000
+
 const FIRST_DATA_TIMEOUT_MS = 4000
 
 /**
@@ -58,6 +67,19 @@ export class UdpLink implements MavlinkLink {
   private sawData = false
   private closed = false
   private conflict = ''
+  // Last time a byte arrived from the vehicle. `sawData` is a ONE-WAY latch -- once the
+  // first packet lands it never resets -- so on its own it cannot tell "receiving" from
+  // "received once, an hour ago, and has been silent since". On UDP that gap is the whole
+  // problem: bind always succeeds and the socket never errors when the far end vanishes,
+  // so a dead vehicle looks exactly like a healthy one. This is what makes it distinguishable.
+  private lastDataMs = 0
+  private stallTimer: ReturnType<typeof setInterval> | null = null
+  private stalled = false
+  // Auto-reopen backoff. A UDP socket error (EADDRINUSE from a late-arriving competitor,
+  // an interface going down on a laptop sleep/wake) used to leave the link dead until the
+  // operator noticed and clicked reconnect.
+  private reopenTimer: ReturnType<typeof setTimeout> | null = null
+  private reopenDelay = RECONNECT_MIN_MS
   private firstDataTimer: NodeJS.Timeout | null = null
   private readonly localPort: number
   private readonly cb: LinkCallbacks
@@ -100,6 +122,12 @@ export class UdpLink implements MavlinkLink {
 
     sock.on('message', (buf, rinfo) => {
       if (!this.fixedRemote) this.remote = { host: rinfo.address, port: rinfo.port }
+      this.lastDataMs = Date.now()
+      this.reopenDelay = RECONNECT_MIN_MS   // a working link resets the backoff
+      if (this.stalled) {
+        this.stalled = false
+        this.status()                        // recovered -- drop the stall warning
+      }
       if (!this.sawData) {
         this.sawData = true
         if (this.firstDataTimer) {
@@ -110,7 +138,10 @@ export class UdpLink implements MavlinkLink {
       }
       this.cb.onData(buf)
     })
-    sock.on('error', (err) => this.cb.onStatus({ connected: false, error: err.message }))
+    sock.on('error', (err) => {
+      this.cb.onStatus({ connected: false, error: err.message })
+      this.scheduleReopen(err.message)
+    })
     sock.on('listening', () => {
       // Report connected (the 1 Hz GCS heartbeat depends on it -- see LinkStatus) but
       // say plainly that nothing has arrived yet.
@@ -128,6 +159,19 @@ export class UdpLink implements MavlinkLink {
       })
     }, FIRST_DATA_TIMEOUT_MS)
 
+    if (!this.stallTimer) {
+      this.stallTimer = setInterval(() => {
+        if (this.closed || !this.sawData || this.stalled) return
+        const age = Date.now() - this.lastDataMs
+        if (age >= STALL_MS) {
+          this.stalled = true
+          this.status({
+            waiting: `no data for ${Math.round(age / 1000)}s — vehicle silent or link down`
+          })
+        }
+      }, STALL_POLL_MS)
+    }
+
     try {
       sock.bind(this.localPort)
     } catch (e: any) {
@@ -140,8 +184,40 @@ export class UdpLink implements MavlinkLink {
     if (this.socket && this.remote) this.socket.send(buf, this.remote.port, this.remote.host)
   }
 
+  private scheduleReopen(why: string): void {
+    if (this.closed || this.reopenTimer) return
+    const delay = this.reopenDelay
+    this.reopenDelay = Math.min(this.reopenDelay * 2, RECONNECT_MAX_MS)
+    this.cb.onStatus({
+      connected: false,
+      error: why,
+      waiting: `reconnecting in ${Math.round(delay / 1000)}s…`
+    })
+    this.reopenTimer = setTimeout(() => {
+      this.reopenTimer = null
+      if (this.closed) return
+      try {
+        this.socket?.close()
+      } catch {
+        /* already gone */
+      }
+      this.socket = null
+      this.sawData = false      // a fresh socket has to prove itself again
+      this.stalled = false
+      this.open()
+    }, delay)
+  }
+
   close(): void {
     this.closed = true
+    if (this.stallTimer) {
+      clearInterval(this.stallTimer)
+      this.stallTimer = null
+    }
+    if (this.reopenTimer) {
+      clearTimeout(this.reopenTimer)
+      this.reopenTimer = null
+    }
     if (this.firstDataTimer) {
       clearTimeout(this.firstDataTimer)
       this.firstDataTimer = null
