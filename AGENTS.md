@@ -173,3 +173,22 @@ Bondor sits on "listening — no data from the vehicle yet".
 Fix is to delete and re-POST the identical bridge. duburi_ws's `connect` /
 `duburi_manager start` now print the exact two curl commands when this happens
 (`connection_config.diagnose_bridge`).
+
+## The companion failsafe does NOT count Bondor's heartbeat
+
+`FS_GCS_SYSID`/`FS_GCS_COMPID` scope the board's companion-lost failsafe to ONE named
+source — default **255/191**, which is duburi_ws. Bondor is **255/190**, so our 1 Hz GCS
+heartbeat never feeds that timer however healthy the link looks. `matchesCompanion()`
+treats 0 as a wildcard; anything else must match exactly.
+
+The board latches "companion seen" only once that named source has appeared, so a
+Bondor-only session on a freshly-booted board never trips it — **which is why this does
+not reproduce on a bench where duburi_ws is never run.** Once duburi_ws has connected in
+that power cycle, arming with only Bondor connected trips `Failsafe: surfacing (companion
+lost)` after ~5 s: the board leaves MANUAL for SURFACE and drives the four VERTICAL
+thrusters (5-8), which reads as "arming spun the motors on its own".
+
+`DiveView` warns above the Arm button whenever the board's failsafe identity does not
+match Bondor's own and the failsafe is enabled. Do not "fix" this by making Bondor send
+191 — distinguishing the companion from the ground station is the entire point of those
+params, and a dead Jetson with Bondor connected must still surface.

@@ -1,4 +1,5 @@
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -17,7 +18,13 @@ import { useGamepad } from '../joystick/useGamepad'
 import AttitudeIndicator from '../components/AttitudeIndicator'
 import HeadingIndicator from '../components/HeadingIndicator'
 import StatusConsole from '../components/StatusConsole'
-import { FLIGHT_MODE_LABELS, FlightMode, FW_BEHAVIOUR_REV_REQUIRED } from '../../../shared/protocol'
+import {
+  FLIGHT_MODE_LABELS,
+  FlightMode,
+  FW_BEHAVIOUR_REV_REQUIRED,
+  GCS_COMPONENT_ID,
+  GCS_SYSTEM_ID
+} from '../../../shared/protocol'
 
 const DEG = 180 / Math.PI
 
@@ -94,6 +101,15 @@ export default function DiveView(): JSX.Element {
 
   const heading = ((t.yaw * DEG) + 360) % 360
   const connected = t.status.connected
+  // 0 is the firmware's documented wildcard, so only a NON-zero mismatch matters.
+  const fsSys = t.paramValues['FS_GCS_SYSID']
+  const fsComp = t.paramValues['FS_GCS_COMPID']
+  const fsEnabled = (t.paramValues['FS_GCS_ENABLE'] ?? 0) > 0
+  const companionMismatch =
+    fsEnabled &&
+    fsSys !== undefined &&
+    fsComp !== undefined &&
+    ((fsSys !== 0 && fsSys !== GCS_SYSTEM_ID) || (fsComp !== 0 && fsComp !== GCS_COMPONENT_ID))
 
   return (
     <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', lg: '1fr 340px' }, height: '100%', minHeight: 0 }}>
@@ -159,6 +175,31 @@ export default function DiveView(): JSX.Element {
 
         <Card>
           <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+            {/* THE COMPANION FAILSAFE DOES NOT COUNT BONDOR.
+                FS_GCS_SYSID/FS_GCS_COMPID scope the board's companion-lost failsafe to
+                ONE named source -- by default 255/191, which is duburi_ws. Bondor is
+                255/190, so our 1 Hz heartbeat never feeds that timer however healthy
+                the link looks.
+                The board only latches `companion seen` once that named source has
+                appeared, so a Bondor-only session on a freshly-booted board is fine --
+                and that is why this never reproduces on a bench where duburi_ws is
+                never run. But once duburi_ws HAS connected in this power cycle,
+                arming with only Bondor connected trips "Failsafe: surfacing (companion
+                lost)" ~5 s later, which switches out of MANUAL into SURFACE and drives
+                the four VERTICAL thrusters (5-8) up. That reads as "arming spun the
+                motors on its own". */}
+            {companionMismatch && (
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                <b>Arming from Bondor alone may SURFACE the vehicle.</b> This board&apos;s
+                companion failsafe is scoped to {fsSys}/{fsComp}; Bondor is {GCS_SYSTEM_ID}/
+                {GCS_COMPONENT_ID}, so Bondor&apos;s heartbeat does not satisfy it. If
+                duburi_ws has connected since the last board reboot, arming trips
+                &quot;companion lost&quot; after ~5 s and the board switches to SURFACE and
+                drives the vertical thrusters. Configure and calibrate here freely — just
+                do not ARM unless duburi_ws is also running, the board has been
+                power-cycled, or you set FS_GCS_COMPID = 0 (wildcard) for bench work.
+              </Alert>
+            )}
             <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
               <Button variant="contained" color={t.armed ? 'error' : 'success'} disabled={!connected} onClick={() => arm(!t.armed)}>
                 {t.armed ? 'Disarm' : 'Arm'}
