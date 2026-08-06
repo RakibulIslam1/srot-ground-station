@@ -32,9 +32,16 @@ function Channel({ ch }: { ch: number }): JSX.Element {
 
   const [us, setUs] = useState<number>(trim)
   const [on, setOn] = useState(false)
+  // Function starts hidden unless this channel already HAS one -- an assigned payload
+  // should stay visible, an unassigned one should not take up the row.
+  const [showFunc, setShowFunc] = useState<boolean>(!!func && func !== 0)
   useEffect(() => setUs(trim), [trim])
 
   const r = role ?? 0
+  const funcLabel =
+    func && func !== 0
+      ? (SERVO_FUNCTIONS.find((o) => o.value === func)?.label ?? 'Function')
+      : '+ Function'
 
   return (
     <Card>
@@ -56,25 +63,46 @@ function Channel({ ch }: { ch: number }): JSX.Element {
             ))}
           </TextField>
 
-          {/* IDENTITY, not authority. The firmware never reads SERVOn_FUNCTION --
-              it is storage so the payload map lives on the board and travels with
-              the hull, instead of in a host-side table that goes stale the moment
-              someone re-wires a channel. duburi_ws reads it at bring-up. */}
-          <TextField
-            select
-            size="small"
-            label="Function"
-            value={func ?? 0}
-            disabled={!connected || func === undefined}
-            onChange={(e) => setParam(`SERVO${ch}_FUNCTION`, Number(e.target.value))}
-            sx={{ minWidth: 150 }}
-          >
-            {SERVO_FUNCTIONS.map((o) => (
-              <MenuItem key={o.value} value={o.value}>
-                {o.label}
-              </MenuItem>
-            ))}
-          </TextField>
+          {/* IDENTITY, not authority. The firmware never reads SERVOn_FUNCTION -- it is
+              storage so the payload map lives on the board and travels with the hull,
+              instead of in a host-side table that goes stale the moment someone re-wires
+              a channel. duburi_ws reads it at bring-up.
+
+              COLLAPSED behind a disclosure, deliberately. The operator's day-to-day job on
+              this tab is Role (Servo vs Switch) and testing the channel -- Function is set
+              once when the payload is built and never touched again. Having both selectors
+              at equal weight made a rarely-used field compete with the one that decides
+              whether the channel does anything at all.
+
+              NOT removed: the firmware defines it, protocol.ts mirrors it, and duburi_ws's
+              drift test greps this file for it. Hiding the control is a UI call; deleting
+              the field would be a contract change. */}
+          {showFunc ? (
+            <TextField
+              select
+              size="small"
+              label="Function"
+              value={func ?? 0}
+              disabled={!connected || func === undefined}
+              onChange={(e) => setParam(`SERVO${ch}_FUNCTION`, Number(e.target.value))}
+              sx={{ minWidth: 150 }}
+            >
+              {SERVO_FUNCTIONS.map((o) => (
+                <MenuItem key={o.value} value={o.value}>
+                  {o.label}
+                </MenuItem>
+              ))}
+            </TextField>
+          ) : (
+            <Button
+              size="small"
+              variant="text"
+              onClick={() => setShowFunc(true)}
+              sx={{ alignSelf: 'center', textTransform: 'none', color: 'text.secondary' }}
+            >
+              {funcLabel}
+            </Button>
+          )}
         </Stack>
 
         {r === 1 && (
