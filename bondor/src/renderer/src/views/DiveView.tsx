@@ -107,10 +107,26 @@ export default function DiveView(): JSX.Element {
   const fsSys = t.paramValues['FS_GCS_SYSID']
   const fsComp = t.paramValues['FS_GCS_COMPID']
   const fsEnabled = (t.paramValues['FS_GCS_ENABLE'] ?? 0) > 0
+  // COMP_SEEN (firmware, NAMED_VALUE_FLOAT): has the configured companion actually been
+  // heard since boot? The board's companionLost() only arms once it has --
+  //     if (!s_companion_seen) return false;   // never seen => cannot be lost
+  // -- so on a freshly-booted board with only Bondor connected, arming is completely safe.
+  //
+  // Without this the warning fired on EVERY session, because the mismatch it tested for
+  // (fsComp 191 != our 190) is true by default and says nothing about whether arming will
+  // actually trip. That taught the operator to click "widen the failsafe" by reflex on a
+  // board where nothing was wrong, which is the opposite of what a safety prompt should do.
+  //
+  // undefined = the board predates COMP_SEEN. Fall back to warning, since on those builds we
+  // genuinely cannot tell -- an unnecessary warning beats a missed one.
+  const compSeen = useTelemetry((s) => s.named['COMP_SEEN'])
+  const companionHasAppeared = compSeen === undefined ? true : compSeen > 0.5
+
   const companionMismatch =
     fsEnabled &&
     fsSys !== undefined &&
     fsComp !== undefined &&
+    companionHasAppeared &&
     ((fsSys !== 0 && fsSys !== GCS_SYSTEM_ID) || (fsComp !== 0 && fsComp !== GCS_COMPONENT_ID))
   // Bench mode is ON when the compid is wildcarded, i.e. any GCS -- including us --
   // satisfies the companion failsafe.
@@ -196,14 +212,16 @@ export default function DiveView(): JSX.Element {
                 motors on its own". */}
             {companionMismatch && (
               <Alert severity="warning" sx={{ mb: 1.5 }}>
-                <b>Arming from Bondor alone may SURFACE the vehicle.</b> This board&apos;s
+                <b>duburi_ws has connected since the last reboot — arming from Bondor alone
+                will SURFACE the vehicle.</b> This board&apos;s
                 companion failsafe is scoped to {fsSys}/{fsComp}; Bondor is {GCS_SYSTEM_ID}/
                 {GCS_COMPONENT_ID}, so Bondor&apos;s heartbeat does not satisfy it. If
                 duburi_ws has connected since the last board reboot, arming trips
                 &quot;companion lost&quot; after ~5 s and the board switches to SURFACE and
                 drives the vertical thrusters. Configure and calibrate here freely — just
                 do not ARM unless duburi_ws is also running, the board has been
-                power-cycled, or you enable bench mode below.
+                power-cycled (which clears this — the failsafe cannot fire until the
+                companion has been seen), or you enable bench mode below.
                 <Box sx={{ mt: 1 }}>
                   <Button
                     size="small"
