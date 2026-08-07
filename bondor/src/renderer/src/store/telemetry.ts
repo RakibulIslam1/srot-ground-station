@@ -63,6 +63,61 @@ export type SaveOutcome = {
 // reply shares an ~8/s uplink slot, so this is generous on purpose.
 const SAVE_TIMEOUT_MS = 4000
 
+// =============================================================================
+//  BLACKBOX — flight recorder
+//
+//  MODULE SCOPE, deliberately. This used to live in AnalyzeView's component state, so
+//  switching to the Dive tab UNMOUNTED the recorder: the interval was torn down, the rows
+//  ref was garbage collected, and the flight you were recording no longer existed. You could
+//  only record while staring at the graphs, which is the one moment you are not flying.
+//
+//  Living here it survives every tab change, and it is a plain module array rather than
+//  zustand state so a 20 Hz push does not re-render the whole app.
+// =============================================================================
+export interface BlackboxEvent {
+  t: number
+  kind: 'mode' | 'arm' | 'status' | 'command'
+  detail: string
+}
+
+const REC_HZ = 20
+let recRows: Record<string, number>[] = []
+let recEvents: BlackboxEvent[] = []
+let recTimer: ReturnType<typeof setInterval> | null = null
+let recT0 = 0
+let recLastMode = -1
+let recLastArmed: boolean | null = null
+let recStatusSeen = 0
+
+const recElapsed = (): number => (Date.now() - recT0) / 1000
+
+/** Append an event. Safe to call when not recording — it is simply dropped. */
+export function blackboxEvent(kind: BlackboxEvent['kind'], detail: string): void {
+  if (!recTimer) return
+  recEvents.push({ t: recElapsed(), kind, detail })
+}
+
+/** One sample: fixed signals + every NAMED_VALUE_FLOAT + mode/armed. */
+function recSample(s: TelemetryState): Record<string, number> {
+  const DEG = 180 / Math.PI
+  const out: Record<string, number> = {
+    t: recElapsed(),
+    mode: s.mode,
+    armed: s.armed ? 1 : 0,
+    roll: s.roll * DEG,
+    pitch: s.pitch * DEG,
+    yaw: s.yaw * DEG,
+    depth: s.depth,
+    battV: s.battVolt,
+    battA: s.battCurr
+  }
+  s.rpm.forEach((r, i) => (out[`rpm${i + 1}`] = r))
+  // Every named value, so DEPTH_CMD/ERR/OUT, MIX_*, AT_*, YAW_REF etc. are all captured
+  // without having to know in advance which one will matter.
+  for (const [k, v] of Object.entries(s.named)) out[`nv:${k}`] = v
+  return out
+}
+
 // Non-reactive inspector registry (updated every message, read on a timer).
 export const inspector: {
   rates: Record<string, number>
@@ -112,6 +167,17 @@ interface TelemetryState {
   requestParams: () => void
   setParam: (id: string, value: number) => void
   saveParams: () => Promise<SaveOutcome>
+
+  // --- Blackbox flight recorder (survives tab changes) ---
+  recording: boolean
+  recCount: number
+  startRecording: () => void
+  stopRecording: () => void
+  clearRecording: () => void
+  /** CSV of every sample. Returns null when nothing was recorded. */
+  recordingCsv: () => string | null
+  /** CSV of mode changes, arm/disarm, statustexts and commands, timestamped to match. */
+  recordingEventsCsv: () => string | null
   writeParams: (
     entries: Array<{ name: string; value: number }>,
     onProgress?: (done: number, total: number) => void
@@ -305,14 +371,87 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
   connect: (opts) => void window.bondor.connect(opts),
   disconnect: () => void window.bondor.disconnect(),
 
-  arm: (armed) =>
-    void window.bondor.sendCommandLong({ command: MAV_CMD.COMPONENT_ARM_DISARM, params: [armed ? 1 : 0] }),
+  recording: false,
+  recCount: 0,
 
-  setMode: (mode) =>
-    void window.bondor.sendCommandLong({ command: MAV_CMD.DO_SET_MODE, params: [1, mode] }),
+  startRecording: () => {
+    if (recTimer) return
+    recRows = []
+    recEvents = []
+    recT0 = Date.now()
+    recLastMode = -1
+    recLastArmed = null
+    recStatusSeen = get().statusText.length   // only log lines from here on
+    set({ recording: true, recCount: 0 })
+    recTimer = setInterval(() => {
+      const s = get()
+      recRows.push(recSample(s))
 
-  sendMove: (type, primary, speed, aux, timeout) =>
-    void window.bondor.sendCommandLong({ command: MAV_CMD.SROT_MOVE, params: [type, primary, speed, aux, timeout] }),
+      // Derive events from state rather than needing every call site to report itself.
+      // Mode and arm changes are the two things you always want beside the traces, and
+      // polling them here means nothing can forget to log.
+      if (s.mode !== recLastMode) {
+        if (recLastMode !== -1) recEvents.push({ t: recElapsed(), kind: 'mode', detail: `mode ${recLastMode} -> ${s.mode}` })
+        recLastMode = s.mode
+      }
+      if (s.armed !== recLastArmed) {
+        if (recLastArmed !== null) recEvents.push({ t: recElapsed(), kind: 'arm', detail: s.armed ? 'ARMED' : 'DISARMED' })
+        recLastArmed = s.armed
+      }
+      for (let i = recStatusSeen; i < s.statusText.length; i++) {
+        recEvents.push({ t: recElapsed(), kind: 'status', detail: s.statusText[i].text })
+      }
+      recStatusSeen = s.statusText.length
+
+      set({ recCount: recRows.length })
+    }, 1000 / REC_HZ)
+  },
+
+  stopRecording: () => {
+    if (recTimer) clearInterval(recTimer)
+    recTimer = null
+    set({ recording: false })
+  },
+
+  clearRecording: () => {
+    recRows = []
+    recEvents = []
+    set({ recCount: 0 })
+  },
+
+  recordingCsv: () => {
+    if (!recRows.length) return null
+    // Union of every key seen, not just the first row's: NAMED_VALUE_FLOATs appear over time
+    // (AT_* only during an autotune, DEPTH_ERR only while the loop runs), so keying off row 0
+    // would silently drop every signal that started late.
+    const cols = new Set<string>()
+    for (const r of recRows) for (const k of Object.keys(r)) cols.add(k)
+    const keys = Array.from(cols)
+    const lines = [keys.join(',')]
+    for (const r of recRows) lines.push(keys.map((c) => (r[c] ?? '')).join(','))
+    return lines.join('\n')
+  },
+
+  recordingEventsCsv: () => {
+    if (!recEvents.length) return null
+    const esc = (v: string): string => `"${v.replace(/"/g, '""')}"`
+    return ['t,kind,detail', ...recEvents.map((e) => `${e.t.toFixed(2)},${e.kind},${esc(e.detail)}`)].join('\n')
+  },
+
+  arm: (armed) => {
+    blackboxEvent('command', armed ? 'ARM' : 'DISARM')
+    void window.bondor.sendCommandLong({ command: MAV_CMD.COMPONENT_ARM_DISARM, params: [armed ? 1 : 0] })
+  },
+
+  setMode: (mode) => {
+    blackboxEvent('command', `DO_SET_MODE ${mode}`)
+    void window.bondor.sendCommandLong({ command: MAV_CMD.DO_SET_MODE, params: [1, mode] })
+  },
+
+  sendMove: (type, primary, speed, aux, timeout) => {
+    blackboxEvent('command', `SROT_MOVE type=${type} primary=${primary} speed=${speed} aux=${aux} timeout=${timeout}`)
+    void window.bondor.sendCommandLong({ command: MAV_CMD.SROT_MOVE, params: [type, primary, speed, aux, timeout] })
+  },
 
   reboot: () =>
     void window.bondor.sendCommandLong({ command: MAV_CMD.PREFLIGHT_REBOOT_SHUTDOWN, params: [1] }),

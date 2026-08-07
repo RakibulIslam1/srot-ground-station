@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   Box,
+  Chip,
   Divider,
   Drawer,
   IconButton,
@@ -29,6 +30,7 @@ import DarkModeIcon from '@mui/icons-material/DarkMode'
 import LightModeIcon from '@mui/icons-material/LightMode'
 
 import ConnectionBar from './components/ConnectionBar'
+import { useTelemetry } from './store/telemetry'
 import DiveView from './views/DiveView'
 import ParamsView from './views/ParamsView'
 import SetupView from './views/SetupView'
@@ -56,6 +58,25 @@ const NAV = [
 ] as const
 
 const DRAWER_W = 208
+
+// Recording is now global, so it MUST be visible globally. The whole point of moving the
+// recorder out of the Analyze tab is that you record while flying on the Dive tab -- a
+// recorder you cannot see from there is one you will forget to stop, or forget is running.
+function RecIndicator(): JSX.Element | null {
+  const recording = useTelemetry((s) => s.recording)
+  const count = useTelemetry((s) => s.recCount)
+  if (!recording) return null
+  return (
+    <Chip
+      size="small"
+      color="error"
+      variant="filled"
+      label={`REC ${(count / 20).toFixed(0)}s`}
+      sx={{ fontWeight: 700, animation: 'bondorRecPulse 1.6s ease-in-out infinite',
+            '@keyframes bondorRecPulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.45 } } }}
+    />
+  )
+}
 
 export default function App(): JSX.Element {
   const [active, setActive] = useState<string>('dive')
@@ -90,6 +111,7 @@ export default function App(): JSX.Element {
             <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 1 }}>
               Bondor
             </Typography>
+            <RecIndicator />
           </Stack>
         </Toolbar>
         <Divider />

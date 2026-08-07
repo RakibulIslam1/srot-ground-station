@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Box,
   Button,
@@ -37,10 +37,15 @@ function currentSignals(): Record<string, number> {
 export default function AnalyzeView(): JSX.Element {
   const named = useTelemetry((s) => s.named)
   const [selected, setSelected] = useState<string[]>(['roll', 'pitch', 'yaw'])
-  const [recording, setRecording] = useState(false)
-  const [count, setCount] = useState(0)
-  const rows = useRef<Record<string, number>[]>([])
-  const recTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Recorder state lives in the STORE, not here. Keeping it in component state meant
+  // switching tabs unmounted the recorder and destroyed the flight you were capturing.
+  const recording = useTelemetry((s) => s.recording)
+  const count = useTelemetry((s) => s.recCount)
+  const startRec = useTelemetry((s) => s.startRecording)
+  const stopRec = useTelemetry((s) => s.stopRecording)
+  const clear = useTelemetry((s) => s.clearRecording)
+  const recordingCsv = useTelemetry((s) => s.recordingCsv)
+  const recordingEventsCsv = useTelemetry((s) => s.recordingEventsCsv)
 
   const available = useMemo(() => {
     const base = ['roll', 'pitch', 'yaw', 'depth', 'battV', 'battA', 'rpm1', 'rpm2', 'rpm3', 'rpm4', 'rpm5', 'rpm6', 'rpm7', 'rpm8']
@@ -53,21 +58,6 @@ export default function AnalyzeView(): JSX.Element {
   const toggle = (k: string): void =>
     setSelected((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k].slice(0, 6)))
 
-  const startRec = (): void => {
-    rows.current = []
-    setCount(0)
-    setRecording(true)
-    const t0 = Date.now()
-    recTimer.current = setInterval(() => {
-      rows.current.push({ t: (Date.now() - t0) / 1000, ...currentSignals() })
-      setCount(rows.current.length)
-    }, 50) // 20 Hz
-  }
-  const stopRec = (): void => {
-    if (recTimer.current) clearInterval(recTimer.current)
-    recTimer.current = null
-    setRecording(false)
-  }
 
   const download = (text: string, name: string, type: string): void => {
     const url = URL.createObjectURL(new Blob([text], { type }))
@@ -77,16 +67,15 @@ export default function AnalyzeView(): JSX.Element {
     a.click()
     URL.revokeObjectURL(url)
   }
+  // Two files sharing one t=0: the sample trace, and the event log (mode changes,
+  // arm/disarm, statustexts and every command sent). "Which mode was it in when that
+  // happened" is the question these exist to answer, so they must line up.
   const exportCsv = (): void => {
-    if (!rows.current.length) return
-    const cols = Object.keys(rows.current[0])
-    const lines = [cols.join(',')]
-    for (const r of rows.current) lines.push(cols.map((c) => r[c] ?? '').join(','))
-    download(lines.join('\n'), `bondor-log-${Date.now()}.csv`, 'text/csv')
-  }
-  const clear = (): void => {
-    rows.current = []
-    setCount(0)
+    const stamp = Date.now()
+    const csv = recordingCsv()
+    if (csv) download(csv, `bondor-log-${stamp}.csv`, 'text/csv')
+    const ev = recordingEventsCsv()
+    if (ev) download(ev, `bondor-events-${stamp}.csv`, 'text/csv')
   }
 
   const imuSeries: Series[] = [
