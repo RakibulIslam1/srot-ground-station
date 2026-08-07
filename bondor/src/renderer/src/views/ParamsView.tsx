@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -22,7 +23,7 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import SaveIcon from '@mui/icons-material/Save'
 import DownloadIcon from '@mui/icons-material/Download'
 import UploadIcon from '@mui/icons-material/Upload'
-import { useTelemetry } from '../store/telemetry'
+import { useTelemetry, type SaveOutcome } from '../store/telemetry'
 import { ParamGroups } from '../components/ParamControls'
 import { downloadText, pickTextFile } from '../utils/files'
 import {
@@ -55,6 +56,16 @@ export default function ParamsView(): JSX.Element {
   const [applying, setApplying] = useState(false)
   const [applyDone, setApplyDone] = useState(0)
   const [result, setResult] = useState<{ ok: number; failed: string[] } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null)
+
+  const doSave = async (): Promise<void> => {
+    setSaving(true)
+    setSaveOutcome(null)
+    const outcome = await saveParams()
+    setSaving(false)
+    setSaveOutcome(outcome)
+  }
 
   const received = useMemo(() => Object.keys(paramValues).length, [paramValues])
   const loading = paramCount > 0 && received < paramCount
@@ -96,8 +107,9 @@ export default function ParamsView(): JSX.Element {
     setPending(null)
     setResult({ ok: res.written.length, failed: res.failed })
     // params::set() persists each write immediately, so this is belt-and-braces — but
-    // it also covers the deferred calibration flush for any CAL_* rows.
-    saveParams()
+    // it also covers the deferred calibration flush for any CAL_* rows. Surface its
+    // outcome too: an import that wrote every row but failed to flush is still a loss.
+    setSaveOutcome(await saveParams())
   }
 
   const rebootNeeded = pending?.diff.changed.some((c) => needsReboot(c.name)) ?? false
@@ -108,8 +120,14 @@ export default function ParamsView(): JSX.Element {
         <Button variant="contained" startIcon={<RefreshIcon />} disabled={!connected} onClick={requestParams}>
           {received ? 'Reload' : 'Load parameters'}
         </Button>
-        <Button variant="outlined" startIcon={<SaveIcon />} disabled={!connected || !received} onClick={saveParams}>
-          Save to flash
+        <Button
+          variant="outlined"
+          startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SaveIcon />}
+          disabled={!connected || !received || saving}
+          onClick={doSave}
+          title="Write every parameter to the board's flash and wait for it to confirm"
+        >
+          {saving ? 'Saving…' : 'Save to flash'}
         </Button>
         <Button
           variant="outlined"
@@ -142,6 +160,30 @@ export default function ParamsView(): JSX.Element {
       </Stack>
 
       {loading && <LinearProgress variant="determinate" value={(received / paramCount) * 100} sx={{ mb: 2, borderRadius: 2 }} />}
+
+      {saveOutcome && (
+        <Alert
+          severity={
+            saveOutcome.state === 'saved'
+              ? 'success'
+              : saveOutcome.state === 'assumed'
+                ? 'info'
+                : 'error'
+          }
+          onClose={() => setSaveOutcome(null)}
+          sx={{ mb: 2 }}
+        >
+          {saveOutcome.state === 'saved' && 'Saved — the vehicle confirmed the write to flash.'}
+          {saveOutcome.state === 'failed' &&
+            `NOT saved. The vehicle reported the write failed — your changes will be gone at the next boot. ${saveOutcome.detail ?? ''}`}
+          {saveOutcome.state === 'rejected' &&
+            `The vehicle refused the save request (${saveOutcome.detail ?? 'no detail'}).`}
+          {saveOutcome.state === 'assumed' &&
+            'Save request accepted, but this firmware does not confirm writes. Reload the parameters to verify they stuck.'}
+          {saveOutcome.state === 'no-reply' &&
+            'No acknowledgement from the vehicle — the save may not have happened. Check the link and try again.'}
+        </Alert>
+      )}
 
       {result && (
         <Alert

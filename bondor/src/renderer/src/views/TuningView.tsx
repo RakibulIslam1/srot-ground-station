@@ -76,7 +76,7 @@ export default function TuningView(): JSX.Element {
               <Button variant="contained" color={armed ? 'error' : 'success'} disabled={!connected} onClick={() => arm(!armed)}>
                 {armed ? 'Disarm' : 'Arm'}
               </Button>
-              <Button variant="text" disabled={!connected} onClick={saveParams}>
+              <Button variant="text" disabled={!connected} onClick={() => void saveParams()}>
                 Save gains
               </Button>
             </Stack>

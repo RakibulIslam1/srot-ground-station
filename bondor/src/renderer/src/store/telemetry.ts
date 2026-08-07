@@ -13,6 +13,7 @@ import { create } from 'zustand'
 import {
   FlightMode,
   MAV_CMD,
+  MavResult,
   MoveType,
   type ConnectionStatus,
   type ConnectOptions,
@@ -39,6 +40,28 @@ export interface AckLine {
   result: number
   progress: number
 }
+
+/**
+ * Outcome of a "Save to flash".
+ *
+ * `saved`    — the vehicle confirmed the NVS write completed.
+ * `failed`   — the vehicle reported the write did NOT happen (full/worn NVS).
+ * `rejected` — the vehicle refused the request outright.
+ * `assumed`  — request accepted, but this firmware (< behaviour rev 7) never confirms
+ *              writes, so success cannot be distinguished from silence.
+ * `no-reply` — nothing came back at all.
+ *
+ * Note `assumed` is a deliberately separate state from `saved`: reporting an unconfirmed
+ * write as confirmed is the failure mode this whole path exists to avoid.
+ */
+export type SaveOutcome = {
+  state: 'saved' | 'failed' | 'rejected' | 'assumed' | 'no-reply'
+  detail?: string
+}
+
+// The write is deferred to the board's Core-0 update(), and over the LoRa bridge the
+// reply shares an ~8/s uplink slot, so this is generous on purpose.
+const SAVE_TIMEOUT_MS = 4000
 
 // Non-reactive inspector registry (updated every message, read on a timer).
 export const inspector: {
@@ -88,7 +111,7 @@ interface TelemetryState {
   reboot: () => void
   requestParams: () => void
   setParam: (id: string, value: number) => void
-  saveParams: () => void
+  saveParams: () => Promise<SaveOutcome>
   writeParams: (
     entries: Array<{ name: string; value: number }>,
     onProgress?: (done: number, total: number) => void
@@ -303,8 +326,50 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
 
   setParam: (id, value) => void window.bondor.sendParamSet({ id, value }),
 
-  saveParams: () =>
-    void window.bondor.sendCommandLong({ command: MAV_CMD.PREFLIGHT_STORAGE, params: [1] }),
+  // Save to flash, and WAIT for the vehicle to say what happened.
+  //
+  // This deliberately does not treat the COMMAND_ACK as the answer. The firmware ACKs
+  // PREFLIGHT_STORAGE as ACCEPTED the moment it parses it, then defers the real NVS write
+  // to its Core-0 update() -- so the ACK means "request received", not "written". Reporting
+  // it as saved is how a failed write on a full NVS could look successful and lose a tune.
+  //
+  // The write's true outcome arrives as a STATUSTEXT ("Params saved to flash" /
+  // "SAVE FAILED - params NOT written"). We wait for the ACK to prove the request landed,
+  // then for the STATUSTEXT to learn the result.
+  saveParams: async () => {
+    const ackFrom = get().acks.length
+    const textFrom = get().statusText.length
+    void window.bondor.sendCommandLong({ command: MAV_CMD.PREFLIGHT_STORAGE, params: [1] })
+
+    const deadline = Date.now() + SAVE_TIMEOUT_MS
+    let accepted = false
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 60))
+
+      if (!accepted) {
+        const ack = get()
+          .acks.slice(ackFrom)
+          .find((a) => a.command === MAV_CMD.PREFLIGHT_STORAGE)
+        if (ack) {
+          if (ack.result !== MavResult.ACCEPTED) {
+            return { state: 'rejected', detail: `vehicle returned MAV_RESULT ${ack.result}` }
+          }
+          accepted = true
+        }
+      }
+
+      for (const line of get().statusText.slice(textFrom)) {
+        if (/SAVE FAILED/i.test(line.text)) return { state: 'failed', detail: line.text }
+        if (/params saved to flash/i.test(line.text)) return { state: 'saved' }
+      }
+    }
+
+    // Firmware older than behaviour rev 7 only ever spoke up on FAILURE, so an accepted
+    // request with no complaint is the best evidence of success it can give.
+    return accepted
+      ? { state: 'assumed', detail: 'accepted, but this firmware does not confirm writes — reload to check' }
+      : { state: 'no-reply', detail: 'no acknowledgement from the vehicle' }
+  },
 
   // Bulk parameter write with per-parameter acknowledgement and retry — the restore
   // half of Export/Import.

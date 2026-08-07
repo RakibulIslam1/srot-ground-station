@@ -244,7 +244,141 @@ const META: Record<string, ParamMeta> = {
 
   // Misc
   ESPNOW_EN: { label: 'ESP-NOW link', group: 'Other', options: BOOL },
-  ATUNE: { label: 'Start Autotune', group: 'Other', options: BOOL }
+  ATUNE: { label: 'Start Autotune', group: 'Other', options: BOOL },
+
+  // --- Frame orientation ----------------------------------------------------
+  FRAME_REVERSE: {
+    label: 'Reverse all control axes',
+    group: 'Motors & Frame',
+    options: BOOL,
+    help:
+      'Flips the sign of roll, pitch, yaw, throttle, forward and lateral AFTER the ' +
+      'controllers and BEFORE the mixer. Use when every axis responds backwards but ' +
+      'individual thrusters each spin the right way — that is a frame-orientation ' +
+      'problem, not a motor-direction one, so fix it here and leave MOT_n_DIRECTION alone.'
+  },
+
+  // --- Failsafe addressing --------------------------------------------------
+  FS_GCS_SYSID: {
+    label: 'Companion system ID',
+    group: 'Failsafe',
+    decimals: 0,
+    help: 'Which MAVLink system counts as the companion for the link failsafe. Default 255.'
+  },
+  FS_GCS_COMPID: {
+    label: 'Companion component ID',
+    group: 'Failsafe',
+    decimals: 0,
+    help:
+      'Component that counts as the companion. 0 = any component on the system ID (wildcard). ' +
+      'The failsafe only arms once that companion has been SEEN this power cycle, so a ' +
+      'bench session with no companion attached cannot trip it.'
+  },
+
+  // --- Depth ----------------------------------------------------------------
+  HEADROOM_DEPTH: {
+    label: 'Surface headroom',
+    group: 'Depth',
+    unit: 'm',
+    min: 0,
+    max: 5,
+    step: 0.1,
+    decimals: 2,
+    help: 'Depth the vehicle stops short of when surfacing, so it does not breach.'
+  },
+
+  // --- Heading reference ----------------------------------------------------
+  MAG_FIELD_MIN: {
+    label: 'Min accepted field',
+    group: 'Heading reference',
+    unit: 'µT',
+    min: 0,
+    max: 200,
+    decimals: 1,
+    help:
+      'Lower bound on magnetic field strength for a heading reference to be trusted. ' +
+      'Earth’s field is ~25–65 µT; a reading below this means a bad or shielded sensor.'
+  },
+  MAG_FIELD_MAX: {
+    label: 'Max accepted field',
+    group: 'Heading reference',
+    unit: 'µT',
+    min: 0,
+    max: 500,
+    decimals: 1,
+    help: 'Upper bound. Above this the field is dominated by nearby iron or a magnet, not Earth.'
+  },
+
+  // --- Battery limits used by the motor mixer -------------------------------
+  MOT_BAT_V_MIN: {
+    label: 'Battery voltage — min',
+    group: 'Power',
+    unit: 'V',
+    decimals: 2,
+    help: 'Lower end of the thrust-compensation range. 0 disables compensation.'
+  },
+  MOT_BAT_V_MAX: {
+    label: 'Battery voltage — max',
+    group: 'Power',
+    unit: 'V',
+    decimals: 2,
+    help: 'Upper end of the thrust-compensation range. 0 disables compensation.'
+  },
+
+  RPM_MIN_TGT: {
+    label: 'Minimum target RPM',
+    group: 'Motor RPM loop',
+    decimals: 0,
+    help: 'Below this the closed-loop RPM controller stops commanding and lets the motor idle.'
+  },
+
+  // --- Throttle trim --------------------------------------------------------
+  THR_TRIM_EN: {
+    label: 'Auto throttle trim',
+    group: 'Pilot / Input',
+    options: BOOL,
+    help: 'Slowly learns the throttle needed to hold depth, so neutral stick means neutral buoyancy.'
+  },
+  THR_TRIM_MAX: {
+    label: 'Throttle trim limit',
+    group: 'Pilot / Input',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    decimals: 2,
+    help: 'Hard cap on the learned trim, as a fraction of full throttle.'
+  },
+  THR_TRIM_TAU: {
+    label: 'Throttle trim time constant',
+    group: 'Pilot / Input',
+    unit: 's',
+    decimals: 1,
+    help: 'How slowly the trim adapts. Larger is smoother and less likely to chase the pilot.'
+  },
+
+  STUNT_RATE: {
+    label: 'Stunt rotation rate',
+    group: 'Movement (AUTO)',
+    unit: '°/s',
+    decimals: 0,
+    help: 'Angular rate used by scripted flip/spin manoeuvres.'
+  },
+  STUNT_SPIN_CNT: {
+    label: 'Stunt spin count',
+    group: 'Movement (AUTO)',
+    decimals: 0,
+    help: 'Number of full rotations a spin stunt performs.'
+  },
+
+  SYS_PARAM_VER: {
+    label: 'Parameter defaults version',
+    group: 'Other',
+    decimals: 0,
+    help:
+      'Read-only. The firmware’s PARAM_DEFAULTS_VER. When a build increases this, every ' +
+      'parameter is rewritten from its compiled default and the CAL_* calibration is wiped. ' +
+      'Export before reflashing.'
+  }
 }
 
 // Per-thruster direction (MOT_1..8_DIRECTION).
@@ -267,6 +401,41 @@ for (let i = 0; i <= 15; i++) {
 export function getParamMeta(name: string): ParamMeta {
   if (META[name]) return META[name]
   if (/^PIN_/.test(name)) return { label: name, group: 'GPIO pins', decimals: 0, help: 'Reboot to apply.' }
+  const servo = /^SERVO(\d+)_(FUNCTION|ROLE|MIN|MAX|TRIM)$/.exec(name)
+  if (servo) {
+    const ch = servo[1]
+    const kind = servo[2]
+    const common = { group: 'Servos & Payload', decimals: 0 } as const
+    switch (kind) {
+      case 'FUNCTION':
+        return {
+          ...common,
+          label: `Payload ${ch} — function`,
+          help:
+            'IDENTITY only: what duburi_ws calls this channel. Setting a function does NOT ' +
+            'make the channel drivable — ROLE is what the board acts on.'
+        }
+      case 'ROLE':
+        return {
+          ...common,
+          label: `Payload ${ch} — role`,
+          help:
+            'AUTHORITY: what the board will actually drive on this channel. Orthogonal to ' +
+            'FUNCTION, and the one that decides whether the output can fire.'
+        }
+      case 'MIN':
+        return { ...common, label: `Payload ${ch} — min`, unit: 'µs', help: 'Lower pulse-width limit.' }
+      case 'MAX':
+        return { ...common, label: `Payload ${ch} — max`, unit: 'µs', help: 'Upper pulse-width limit.' }
+      default:
+        return {
+          ...common,
+          label: `Payload ${ch} — trim`,
+          unit: 'µs',
+          help: 'Neutral/centre pulse width, and the value the channel rests at.'
+        }
+    }
+  }
   if (/^SERVO\d+_/.test(name)) return { label: name, group: 'Servos & Payload', decimals: 0 }
   // CAL_* are a view onto the vehicle's sensor calibration (a separate NVS namespace),
   // exposed so Export/Import can back it up. Editing them by hand breaks the attitude
