@@ -375,7 +375,12 @@ export const useTelemetry = create<TelemetryState>((set, get) => ({
   recCount: 0,
 
   startRecording: () => {
-    if (recTimer) return
+    // CLEAR a stale timer, never early-return on one. `if (recTimer) return` meant a timer
+    // orphaned by a hot reload (the module is replaced, the interval keeps running, nothing
+    // owns it) made Record a SILENT no-op for the rest of the process lifetime -- the button
+    // appeared to work and recorded nothing.
+    if (recTimer) clearInterval(recTimer)
+    recTimer = null
     recRows = []
     recEvents = []
     recT0 = Date.now()
