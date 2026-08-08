@@ -43,9 +43,28 @@ function createWindow(): void {
   })
 
   // MAVLink IO — forward every decoded message + status change to the renderer.
+  //
+  // `mainWindow?.` guards NULL but not DESTROYED, and those are different states. After a
+  // window reload or close the reference is still a live object whose underlying native
+  // window is gone, so webContents.send() throws "TypeError: Object has been destroyed".
+  // That escapes from a stream callback deep in the MAVLink parser, where nothing catches
+  // it, and takes down the ENTIRE MAIN PROCESS — connection, recording and all.
+  //
+  // The vehicle keeps streaming at 20+ Hz throughout, so the window is guaranteed to be
+  // destroyed mid-flight of a message. Reloading Bondor while connected hit this every time.
+  const sendToRenderer = (channel: string, payload: unknown): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.webContents.isDestroyed()) return
+    try {
+      mainWindow.webContents.send(channel, payload)
+    } catch {
+      // Destroyed between the check and the send. Dropping a frame to a window that no
+      // longer exists is correct; crashing the process over it is not.
+    }
+  }
   const conn = new MavlinkConnection(
-    (msg) => mainWindow?.webContents.send(IPC.EVT_MESSAGE, msg),
-    (status) => mainWindow?.webContents.send(IPC.EVT_STATUS, status)
+    (msg) => sendToRenderer(IPC.EVT_MESSAGE, msg),
+    (status) => sendToRenderer(IPC.EVT_STATUS, status)
   )
 
   ipcMain.handle(IPC.CONNECT, (_e, opts: ConnectOptions) => conn.connect(opts))
