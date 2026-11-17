@@ -10,6 +10,10 @@ used together:
    telemetry frame and re-emits it as MAVLink over USB, so Bondor connects to it as an ordinary
    serial link.
 
+![Bondor's Dive page: attitude, heading, depth, both batteries, water temperature, leak, firmware revision, arming and modes, per-thruster RPM, joystick shaping, and the board's own messages](docs/media/bondor-dive.jpg)
+
+*Bondor on the bench, disarmed: the board reports a level calibration saved and verified on flash.*
+
 Part of the **SROT** control-board suite:
 
 | Repo | What it is |
